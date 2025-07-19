@@ -1,9 +1,24 @@
+import os
+import requests
+import threading
+from flask import Flask
 import discord
 from discord.ext import commands
-import requests
-import os
 
-# === Get ETH Price from Binance ===
+# === Flask App for Uptime Pings ===
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ ETH Discord bot is live!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8000)
+
+flask_thread = threading.Thread(target=run_flask)
+flask_thread.start()
+
+# === Function to Get ETH Price from Binance ===
 def get_eth_price_binance():
     url = "https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"
     try:
@@ -15,7 +30,7 @@ def get_eth_price_binance():
         print(f"Error fetching price: {e}")
         return None
 
-# === Bot Setup ===
+# === Discord Bot Setup ===
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -24,7 +39,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
 
-# === !price Command ===
 @bot.command()
 async def price(ctx):
     eth_price = get_eth_price_binance()
@@ -33,10 +47,10 @@ async def price(ctx):
     else:
         await ctx.send("⚠️ Couldn't fetch ETH price from Binance.")
 
-# === Run Bot ===
-import os
+# === Run the Bot ===
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not DISCORD_BOT_TOKEN:
     raise ValueError("⚠️ DISCORD_BOT_TOKEN is not set in environment variables.")
 
 bot.run(DISCORD_BOT_TOKEN)
+
