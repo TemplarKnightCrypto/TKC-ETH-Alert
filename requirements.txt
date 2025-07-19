@@ -1,7 +1,8 @@
-flask
-py-cord==2.4.1
-websockets
+discord.py
+requests
 pandas
+flask
 numpy
-ta
-python-dotenv
+
+
+
