@@ -33,4 +33,10 @@ async def price(ctx):
     else:
         await ctx.send("⚠️ Couldn't fetch ETH price from Binance.")
 
-bot.run(TOKEN)
+# === Run Bot ===
+import os
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+if not DISCORD_BOT_TOKEN:
+    raise ValueError("⚠️ DISCORD_BOT_TOKEN is not set in environment variables.")
+
+bot.run(DISCORD_BOT_TOKEN)
