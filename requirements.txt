@@ -1,0 +1,7 @@
+flask
+py-cord==2.4.1
+websockets
+pandas
+numpy
+ta
+python-dotenv
