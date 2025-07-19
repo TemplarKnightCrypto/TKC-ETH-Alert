@@ -1,223 +1,198 @@
-import os
 import discord
-import requests
-import datetime
-import pandas as pd
-import numpy as np
 from discord.ext import commands, tasks
-from flask import Flask
+import requests
 import threading
-from ta.trend import ema_indicator
-from ta.momentum import rsi
-from ta.volatility import average_true_range
+from flask import Flask
+import datetime
+import numpy as np
+import time
 
-# === Flask Uptime Server ===
+# === CONFIG ===
+DISCORD_TOKEN = "YOUR_DISCORD_BOT_TOKEN"
+CHANNEL_ID = YOUR_CHANNEL_ID  # Replace with your channel ID
+COOLDOWN_SECONDS = 900  # 15 minutes
+
+# === FLASK FOR UPTIME ===
 app = Flask(__name__)
-@app.route('/')
+@app.route("/")
 def home():
     return "Bot is live!"
-
 def run_flask():
     app.run(host="0.0.0.0", port=8000)
 
-flask_thread = threading.Thread(target=run_flask)
-flask_thread.start()
+threading.Thread(target=run_flask).start()
 
-# === Discord Setup ===
+# === DISCORD BOT SETUP ===
 intents = discord.Intents.default()
-intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# === Binance API Endpoints ===
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit=100"
-BINANCE_PRICE = "https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"
+# === COOLDOWN TRACKING ===
+last_alert_time = {}
 
-# === Strategy State ===
-alert_sent = False
-alert_channel_id = None
+# === INDICATOR CALCULATION ===
+def get_ohlcv(symbol="ETHUSDT", interval="1m", limit=100):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    data = requests.get(url).json()
+    closes = [float(candle[4]) for candle in data]
+    highs = [float(candle[2]) for candle in data]
+    lows = [float(candle[3]) for candle in data]
+    return closes, highs, lows
 
-# === Indicator Calculation ===
-def get_eth_data():
-    res = requests.get(BINANCE_KLINES)
-    data = res.json()
-    df = pd.DataFrame(data, columns=[
-        'time', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'quote_asset_volume', 'trades',
-        'taker_buy_base', 'taker_buy_quote', 'ignore'
-    ])
-    df['time'] = pd.to_datetime(df['time'], unit='ms')
-    df = df[['time', 'open', 'high', 'low', 'close', 'volume']].astype(float)
-    df['ema50'] = ema_indicator(df['close'], window=50)
-    df['rsi'] = rsi(df['close'], window=14)
-    df['atr'] = average_true_range(df['high'], df['low'], df['close'], window=14)
-    return df
-
-def get_current_price():
-    try:
-        res = requests.get(BINANCE_PRICE)
-        return float(res.json()['price'])
-    except:
+def calculate_indicators():
+    closes, highs, lows = get_ohlcv()
+    if len(closes) < 50:
         return None
 
-# === Strategy Logic ===
-def analyze_strategy(df):
-    global alert_sent
-    current_price = df['close'].iloc[-1]
-    ema50 = df['ema50'].iloc[-1]
-    rsi_val = df['rsi'].iloc[-1]
-    atr_val = df['atr'].iloc[-1]
-    atr_change = df['atr'].iloc[-1] - df['atr'].iloc[-5]
+    close = np.array(closes)
+    high = np.array(highs)
+    low = np.array(lows)
 
-    swing_high = df['high'].iloc[-20:].max()
-    swing_low = df['low'].iloc[-20:].min()
-    fib_0_382 = swing_low + 0.382 * (swing_high - swing_low)
-    fib_0_618 = swing_low + 0.618 * (swing_high - swing_low)
+    ema20 = np.mean(close[-20:])
+    rsi = compute_rsi(close)
+    atr = np.mean(high[-14:] - low[-14:])
 
-    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    fib_low = np.min(close[-50:])
+    fib_high = np.max(close[-50:])
+    fib_618 = fib_high - (fib_high - fib_low) * 0.618
+    fib_382 = fib_high - (fib_high - fib_low) * 0.382
 
-    # === Long: Breakout ===
-    if current_price > ema50 and rsi_val > 60 and atr_change > 0 and not alert_sent:
-        stop = round(current_price - 1.5 * atr_val, 2)
-        tp = round(current_price + 2.0 * atr_val, 2)
-        rr = round((tp - current_price) / (current_price - stop), 2)
-        alert_sent = True
-        return f"""🟢 **ETH Breakout Long**
+    trend_up = close[-1] > ema20
+    trend_down = close[-1] < ema20
 
-💰 Price: ${current_price:,.2f}
-📈 EMA50: ${ema50:,.2f}
-📊 RSI: {rsi_val:.2f}
-📶 ATR Increasing: ✅
+    return {
+        "price": close[-1],
+        "ema": ema20,
+        "rsi": rsi,
+        "atr": atr,
+        "fib_618": fib_618,
+        "fib_382": fib_382,
+        "trend_up": trend_up,
+        "trend_down": trend_down,
+    }
 
-🛑 Stop Loss: ${stop}
-🎯 Take Profit: ${tp}
-📏 Risk/Reward: {rr}:1
+def compute_rsi(data, period=14):
+    delta = np.diff(data)
+    up = delta.clip(min=0)
+    down = -1 * delta.clip(max=0)
+    ma_up = np.mean(up[-period:])
+    ma_down = np.mean(down[-period:])
+    rs = ma_up / ma_down if ma_down != 0 else 0
+    return 100 - (100 / (1 + rs))
 
-🕒 {now}"""
+# === STRATEGY LOGIC ===
+def check_signals(ind):
+    signals = []
 
-    # === Long: Pullback ===
-    elif fib_0_382 <= current_price <= fib_0_618 and current_price > ema50 and rsi_val < 40 and not alert_sent:
-        stop = round(current_price - 1.2 * atr_val, 2)
-        tp = round(current_price + 1.8 * atr_val, 2)
-        rr = round((tp - current_price) / (current_price - stop), 2)
-        alert_sent = True
-        return f"""🟢 **ETH Pullback Long**
+    # Breakout Long
+    if ind["trend_up"] and ind["rsi"] > 55:
+        entry = ind["price"]
+        sl = entry - 1.5 * ind["atr"]
+        tp = entry + 2.0 * ind["atr"]
+        signals.append(("Breakout Long", entry, sl, tp))
 
-💰 Price: ${current_price:,.2f}
-📉 Fib Zone: ${fib_0_382:,.2f} – ${fib_0_618:,.2f}
-📊 RSI: {rsi_val:.2f}
-📈 Trend: Above EMA50 ✅
+    # Pullback Long
+    if ind["trend_up"] and ind["price"] >= ind["fib_618"] and ind["price"] <= ind["fib_382"] and ind["rsi"] < 50:
+        entry = ind["price"]
+        sl = entry - 1.5 * ind["atr"]
+        tp = entry + 2.0 * ind["atr"]
+        signals.append(("Pullback Long", entry, sl, tp))
 
-🛑 Stop Loss: ${stop}
-🎯 Take Profit: ${tp}
-📏 Risk/Reward: {rr}:1
+    # Breakdown Short
+    if ind["trend_down"] and ind["rsi"] < 45:
+        entry = ind["price"]
+        sl = entry + 1.5 * ind["atr"]
+        tp = entry - 2.0 * ind["atr"]
+        signals.append(("Breakdown Short", entry, sl, tp))
 
-🕒 {now}"""
+    # Pullback Short
+    if ind["trend_down"] and ind["price"] <= ind["fib_382"] and ind["price"] >= ind["fib_618"] and ind["rsi"] > 50:
+        entry = ind["price"]
+        sl = entry + 1.25 * ind["atr"]
+        tp = entry - 2.0 * ind["atr"]
+        signals.append(("Pullback Short", entry, sl, tp))
 
-    # === Short: Breakdown ===
-    elif current_price < ema50 and rsi_val < 40 and atr_change > 0 and not alert_sent:
-        stop = round(current_price + 1.5 * atr_val, 2)
-        tp = round(current_price - 2.0 * atr_val, 2)
-        rr = round((current_price - tp) / (stop - current_price), 2)
-        alert_sent = True
-        return f"""🔴 **ETH Breakdown Short**
+    return signals
 
-💰 Price: ${current_price:,.2f}
-📉 EMA50: ${ema50:,.2f}
-📊 RSI: {rsi_val:.2f}
-📶 ATR Increasing: ✅
+# === ALERT COOLDOWN ===
+def should_alert(signal_key):
+    now = time.time()
+    if signal_key not in last_alert_time or now - last_alert_time[signal_key] > COOLDOWN_SECONDS:
+        last_alert_time[signal_key] = now
+        return True
+    return False
 
-🛑 Stop Loss: ${stop}
-🎯 Take Profit: ${tp}
-📏 Risk/Reward: {rr}:1
-
-🕒 {now}"""
-
-    # === Short: Pullback ===
-    elif fib_0_382 <= current_price <= fib_0_618 and current_price < ema50 and rsi_val > 60 and not alert_sent:
-        stop = round(current_price + 1.2 * atr_val, 2)
-        tp = round(current_price - 1.8 * atr_val, 2)
-        rr = round((current_price - tp) / (stop - current_price), 2)
-        alert_sent = True
-        return f"""🔴 **ETH Pullback Short**
-
-💰 Price: ${current_price:,.2f}
-📈 Fib Zone: ${fib_0_382:,.2f} – ${fib_0_618:,.2f}
-📊 RSI: {rsi_val:.2f}
-📉 Trend: Below EMA50 ✅
-
-🛑 Stop Loss: ${stop}
-🎯 Take Profit: ${tp}
-📏 Risk/Reward: {rr}:1
-
-🕒 {now}"""
-
-    return None
-
-# === Monitoring Task ===
-@tasks.loop(seconds=60)
-async def monitor_price():
-    global alert_channel_id
-    if not alert_channel_id:
+# === DISCORD ALERT ===
+async def send_alert(signal_name, entry, sl, tp):
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        print("Channel not found.")
         return
-    try:
-        df = get_eth_data()
-        signal = analyze_strategy(df)
-        if signal:
-            channel = bot.get_channel(alert_channel_id)
-            price = get_current_price()
-            if price:
-                await channel.send(f"📡 **ETH Price:** ${price:,.2f}")
-            await channel.send(signal)
-    except Exception as e:
-        print("Monitor error:", e)
 
-# === Bot Events and Commands ===
+    embed = discord.Embed(
+        title=f"📢 ETH Trade Alert: {signal_name}",
+        description=f"📈 **Entry**: ${entry:,.2f}\n🛑 **Stop Loss**: ${sl:,.2f}\n💰 **Take Profit**: ${tp:,.2f}",
+        color=discord.Color.green() if "Long" in signal_name else discord.Color.red(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    await channel.send(embed=embed)
+
+# === TP/SL WATCHER ===
+active_trades = []
+
+def update_active_trades(price):
+    to_remove = []
+    for trade in active_trades:
+        name, entry, sl, tp = trade
+        if ("Long" in name and (price <= sl or price >= tp)) or ("Short" in name and (price >= sl or price <= tp)):
+            hit = "🛑 SL HIT" if (("Long" in name and price <= sl) or ("Short" in name and price >= sl)) else "💰 TP HIT"
+            alert = f"{hit} for {name} | Price: ${price:,.2f}"
+            bot.loop.create_task(send_simple_alert(alert))
+            to_remove.append(trade)
+    for trade in to_remove:
+        active_trades.remove(trade)
+
+async def send_simple_alert(text):
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send(f"**{text}**")
+
+# === MONITOR TASK ===
+@tasks.loop(seconds=60)
+async def monitor_eth():
+    ind = calculate_indicators()
+    if not ind:
+        return
+
+    price = ind["price"]
+    update_active_trades(price)
+
+    signals = check_signals(ind)
+    for name, entry, sl, tp in signals:
+        if should_alert(name):
+            await send_alert(name, entry, sl, tp)
+            active_trades.append((name, entry, sl, tp))
+
+# === BOT COMMANDS ===
 @bot.event
 async def on_ready():
-    print(f"✅ Bot is online as {bot.user}")
-    monitor_price.start()
+    print(f"{bot.user} is live.")
+    monitor_eth.start()
 
-@bot.command(name="setchannel")
-async def setchannel(ctx):
-    global alert_channel_id
-    alert_channel_id = ctx.channel.id
-    await ctx.send("📡 This channel is now set for live ETH alerts.")
+@bot.command()
+async def trade(ctx):
+    ind = calculate_indicators()
+    if not ind:
+        await ctx.send("Couldn't fetch indicators.")
+        return
 
-@bot.command(name="price")
-async def price(ctx):
-    price = get_current_price()
-    if price:
-        await ctx.send(f"💰 ETH Price: ${price:,.2f}")
-    else:
-        await ctx.send("⚠️ Couldn't fetch ETH price.")
+    signals = check_signals(ind)
+    if not signals:
+        await ctx.send("No trade signals at this time.")
+        return
 
-@bot.command(name="strategy")
-async def strategy(ctx):
-    try:
-        df = get_eth_data()
-        # Temporarily allow alert to bypass alert_sent check
-        global alert_sent
-        original_state = alert_sent
-        alert_sent = False  # Force it to generate signal
-        signal = analyze_strategy(df)
-        alert_sent = original_state  # Restore original state
+    for name, entry, sl, tp in signals:
+        await send_alert(name, entry, sl, tp)
+        active_trades.append((name, entry, sl, tp))
 
-        if signal:
-            price = get_current_price()
-            if price:
-                await ctx.send(f"📡 ETH Price: ${price:,.2f}")
-            await ctx.send(f"📌 **Manual Strategy Check Result:**\n{signal}")
-        else:
-            await ctx.send("ℹ️ No valid trade signal found at this moment.")
-    except Exception as e:
-        await ctx.send(f"⚠️ Error fetching strategy: {e}")
-
-@bot.command(name="reset")
-async def reset(ctx):
-    global alert_sent
-    alert_sent = False
-    await ctx.send("🔄 Alert state reset. New alerts will now trigger.")
-
-# === Run Bot ===
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+# === START BOT ===
 bot.run(DISCORD_TOKEN)
