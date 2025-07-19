@@ -191,6 +191,27 @@ async def price(ctx):
     else:
         await ctx.send("⚠️ Couldn't fetch ETH price.")
 
+@bot.command(name="strategy")
+async def strategy(ctx):
+    try:
+        df = get_eth_data()
+        # Temporarily allow alert to bypass alert_sent check
+        global alert_sent
+        original_state = alert_sent
+        alert_sent = False  # Force it to generate signal
+        signal = analyze_strategy(df)
+        alert_sent = original_state  # Restore original state
+
+        if signal:
+            price = get_current_price()
+            if price:
+                await ctx.send(f"📡 ETH Price: ${price:,.2f}")
+            await ctx.send(f"📌 **Manual Strategy Check Result:**\n{signal}")
+        else:
+            await ctx.send("ℹ️ No valid trade signal found at this moment.")
+    except Exception as e:
+        await ctx.send(f"⚠️ Error fetching strategy: {e}")
+
 @bot.command(name="reset")
 async def reset(ctx):
     global alert_sent
