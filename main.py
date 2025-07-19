@@ -1,29 +1,36 @@
-import os
 import discord
-import requests
 from discord.ext import commands
-from dotenv import load_dotenv
+import requests
+import os
 
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+# === Get ETH Price from Binance ===
+def get_eth_price_binance():
+    url = "https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        return float(data['price'])
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching price: {e}")
+        return None
 
+# === Bot Setup ===
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix='/', intents=intents)
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user}')
+    print(f"✅ Logged in as {bot.user}")
 
-@bot.command(name='eth', help='Get the current ETH price')
-async def eth(ctx):
-    url = 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd'
-    try:
-        response = requests.get(url)
-        data = response.json()
-        price = data['ethereum']['usd']
-        await ctx.send(f'🪙 Ethereum (ETH) Price: ${price:,}')
-    except Exception as e:
-        await ctx.send("Failed to fetch price.")
-        print(e)
+# === !price Command ===
+@bot.command()
+async def price(ctx):
+    eth_price = get_eth_price_binance()
+    if eth_price:
+        await ctx.send(f"📈 **ETH/USDT Price:** ${eth_price:,.2f}")
+    else:
+        await ctx.send("⚠️ Couldn't fetch ETH price from Binance.")
 
 bot.run(TOKEN)
