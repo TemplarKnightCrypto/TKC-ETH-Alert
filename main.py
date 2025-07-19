@@ -2,21 +2,19 @@ import discord
 from discord.ext import commands, tasks
 import requests
 import os
+import datetime
 import threading
 from flask import Flask
-import datetime
-import numpy as np
-import pandas as pd
 
-# === Flask App for Uptime Pings ===
-app = Flask(__name__)
+# === Flask Setup for UptimeRobot ===
+flask_app = Flask(__name__)
 
-@app.route("/")
+@flask_app.route("/")
 def home():
-    return "ETH Bot is live!"
+    return "ETH Trade Bot is running"
 
 def run_flask():
-    app.run(host="0.0.0.0", port=8000)
+    flask_app.run(host="0.0.0.0", port=8000)
 
 threading.Thread(target=run_flask).start()
 
@@ -25,104 +23,134 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# === Strategy State ===
-strategy_active = False
-alert_sent = False
-entry_price = None
-strategy_levels = {}
+# === Global Alert Flags ===
+alert_sent = {
+    "breakout": False,
+    "pullback": False
+}
 
-# === Utility: Fetch ETH Price from CoinGecko ===
-def fetch_eth_price():
+# === ETH Price Fetcher ===
+def get_eth_price():
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
-        response = requests.get(url)
+        response = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd")
         return response.json()["ethereum"]["usd"]
     except Exception as e:
-        print("Price fetch error:", e)
+        print("Error fetching ETH price:", e)
         return None
 
-# === Indicator Calculation (Mock Data + Trend) ===
-def get_indicators():
-    try:
-        url = "https://api.coingecko.com/api/v3/coins/ethereum/market_chart?vs_currency=usd&days=1&interval=hourly"
-        response = requests.get(url)
-        prices = [x[1] for x in response.json()["prices"]]
-        df = pd.DataFrame(prices, columns=["close"])
-        df["ema20"] = df["close"].ewm(span=20).mean()
-        df["rsi"] = 100 - (100 / (1 + df["close"].pct_change().rolling(14).mean() / df["close"].pct_change().rolling(14).std()))
-        df["trend"] = np.where(df["ema20"].iloc[-1] > df["ema20"].iloc[-2], "up", "down")
-        return {
-            "ema": round(df["ema20"].iloc[-1], 2),
-            "rsi": round(df["rsi"].iloc[-1], 2),
-            "trend": df["trend"].iloc[-1]
-        }
-    except Exception as e:
-        print("Indicator error:", e)
-        return None
+# === Trade Monitor Loop ===
+@tasks.loop(seconds=60)
+async def check_trade():
+    channel = discord.utils.get(bot.get_all_channels(), name="eth-alerts")
+    if not channel:
+        print("Alert channel not found.")
+        return
 
-# === Dynamic Strategy Generator ===
-def generate_strategy(price):
-    return {
-        "Breakout Entry": round(price * 0.994, 2),
-        "Breakout SL": round(price * 0.9685, 2),
-        "Breakout TP1": round(price * 1.0105, 2),
-        "Breakout TP2": round(price * 1.033, 2),
-        "Pullback Buy Zone": f"{round(price * 0.9685, 2)} – {round(price * 0.975, 2)}",
-        "Pullback SL": round(price * 0.947, 2),
-        "Pullback TP1": round(price * 1.01, 2),
-        "Pullback TP2": round(price * 1.03, 2)
-    }
+    price = get_eth_price()
+    if not price:
+        return
 
-# === Command: !trade ===
+    now = datetime.datetime.utcnow()
+
+    # Strategy calculations
+    entry_long = round(price * 0.9945, 2)
+    stop_long  = round(price * 0.969, 2)
+    tp1_long   = round(price * 1.0114, 2)
+    tp2_long   = round(price * 1.0339, 2)
+
+    pb_zone_low  = round(price * 0.9693, 2)
+    pb_zone_high = round(price * 0.9777, 2)
+    pb_stop      = round(price * 0.9583, 2)
+    pb_tp1       = round(price * 0.9946, 2)
+    pb_tp2       = round(price * 1.0114, 2)
+
+    # === Breakout Long Alert ===
+    if price > entry_long and not alert_sent["breakout"]:
+        alert_sent["breakout"] = True
+        embed = discord.Embed(
+            title="📢 ETH Breakout Strategy Triggered",
+            color=discord.Color.green(),
+            timestamp=now
+        )
+        embed.add_field(name="Entry", value=f"Close above **${entry_long}**", inline=False)
+        embed.add_field(name="Stop Loss", value=f"Below **${stop_long}**", inline=False)
+        embed.add_field(name="TP1", value=f"${tp1_long}", inline=True)
+        embed.add_field(name="TP2", value=f"${tp2_long}", inline=True)
+        embed.set_footer(text="ETH Trade Bot")
+        await channel.send("@everyone", embed=embed)
+
+    # === Pullback Long Alert ===
+    if pb_zone_low <= price <= pb_zone_high and not alert_sent["pullback"]:
+        alert_sent["pullback"] = True
+        embed = discord.Embed(
+            title="📉 ETH Pullback Strategy Triggered",
+            color=discord.Color.blue(),
+            timestamp=now
+        )
+        embed.add_field(name="Buy Zone", value=f"${pb_zone_low} – ${pb_zone_high}", inline=False)
+        embed.add_field(name="Stop Loss", value=f"Below **${pb_stop}**", inline=False)
+        embed.add_field(name="TP1", value=f"${pb_tp1}", inline=True)
+        embed.add_field(name="TP2", value=f"${pb_tp2}", inline=True)
+        embed.set_footer(text="ETH Trade Bot")
+        await channel.send("@everyone", embed=embed)
+
+# === !trade Command ===
 @bot.command()
 async def trade(ctx):
-    global strategy_active, alert_sent, entry_price, strategy_levels
-    entry_price = fetch_eth_price()
-    indicators = get_indicators()
+    # Reset flags only once
+    if alert_sent["breakout"] or alert_sent["pullback"]:
+        alert_sent["breakout"] = False
+        alert_sent["pullback"] = False
+        await ctx.send("🔄 Trade conditions reset. New alerts will be sent when conditions are met.")
 
-    if not entry_price or not indicators:
-        await ctx.send("⚠️ Error fetching price or indicators.")
+    price = get_eth_price()
+    if not price:
+        await ctx.send("⚠️ Couldn't fetch ETH price.")
         return
 
-    strategy_levels = generate_strategy(entry_price)
-    strategy_active = True
-    alert_sent = False
+    entry_long = round(price * 0.9945, 2)
+    stop_long  = round(price * 0.969, 2)
+    tp1_long   = round(price * 1.0114, 2)
+    tp2_long   = round(price * 1.0339, 2)
 
-    strategy_msg = (
-        f"**ETH Trade Strategies (Live)**\n\n"
-        f"📈 Price: ${entry_price}\n"
-        f"📊 Trend: {indicators['trend']} | EMA: {indicators['ema']} | RSI: {indicators['rsi']}\n\n"
-        f"✅ **Breakout Long**\n"
-        f"• Entry: Above ${strategy_levels['Breakout Entry']}\n"
-        f"• Stop: Below ${strategy_levels['Breakout SL']}\n"
-        f"• TP1: ${strategy_levels['Breakout TP1']} | TP2: ${strategy_levels['Breakout TP2']}\n\n"
-        f"✅ **Pullback Long**\n"
-        f"• Buy Zone: {strategy_levels['Pullback Buy Zone']}\n"
-        f"• Stop: Below ${strategy_levels['Pullback SL']}\n"
-        f"• TP1: ${strategy_levels['Pullback TP1']} | TP2: ${strategy_levels['Pullback TP2']}\n\n"
-        f"⏱️ Strategy monitoring is active."
+    pb_zone_low  = round(price * 0.9693, 2)
+    pb_zone_high = round(price * 0.9777, 2)
+    pb_stop      = round(price * 0.9583, 2)
+    pb_tp1       = round(price * 0.9946, 2)
+    pb_tp2       = round(price * 1.0114, 2)
+
+    embed = discord.Embed(
+        title="📊 ETH Trade Strategies (On-Demand)",
+        color=discord.Color.gold(),
+        timestamp=datetime.datetime.utcnow()
     )
-    await ctx.send(strategy_msg)
-
-# === Command: !forecast ===
-@bot.command()
-async def forecast(ctx):
-    price = fetch_eth_price()
-    indicators = get_indicators()
-    if not price or not indicators:
-        await ctx.send("⚠️ Could not fetch forecast data.")
-        return
-    await ctx.send(
-        f"📉 ETH Forecast\n\n"
-        f"Price: ${price}\n"
-        f"Trend: {indicators['trend']} | EMA: {indicators['ema']} | RSI: {indicators['rsi']}"
+    embed.add_field(
+        name="📈 Breakout Strategy",
+        value=(
+            f"• Entry: Close above **${entry_long}**\n"
+            f"• Stop Loss: Below **${stop_long}**\n"
+            f"• TP1: ${tp1_long}\n"
+            f"• TP2: ${tp2_long}"
+        ),
+        inline=False
     )
+    embed.add_field(
+        name="📉 Pullback Strategy",
+        value=(
+            f"• Buy Zone: ${pb_zone_low} – ${pb_zone_high}\n"
+            f"• Stop Loss: Below **${pb_stop}**\n"
+            f"• TP1: ${pb_tp1}\n"
+            f"• TP2: ${pb_tp2}"
+        ),
+        inline=False
+    )
+    embed.set_footer(text="ETH Trade Bot")
+    await ctx.send(embed=embed)
 
-# === Bot Startup ===
+# === Startup ===
 @bot.event
 async def on_ready():
-    print(f"✅ Bot connected as {bot.user}")
+    print(f"Bot logged in as {bot.user}")
+    check_trade.start()
 
-# === Launch Bot ===
 bot.run(os.getenv("DISCORD_TOKEN"))
-
