@@ -3,6 +3,7 @@ requests
 pandas
 flask
 numpy
+ta
 
 
 
