@@ -5,8 +5,8 @@ import datetime
 import pandas as pd
 import numpy as np
 from discord.ext import commands, tasks
-from ta.trend import ema_indicator, adx
-from ta.momentum import rsi, stochrsi
+from ta.trend import ema_indicator
+from ta.momentum import rsi, stochrsi, tsi
 from ta.volatility import average_true_range
 from ta.volume import on_balance_volume
 from dotenv import load_dotenv
@@ -95,6 +95,7 @@ def apply_indicators(df):
     df['ema50'] = ema_indicator(df['close'], window=50)
     df['rsi'] = rsi(df['close'], window=14)
     df['stochrsi'] = stochrsi(df['close'], window=14)
+    df['tsi'] = tsi(df['close'])
     df['obv'] = on_balance_volume(df['close'], df['volume'])
     df['atr'] = average_true_range(df['high'], df['low'], df['close'], window=14)
 
@@ -115,10 +116,8 @@ def apply_indicators(df):
 
     df['stochrsi_cross_up'] = df['stochrsi'].diff() > 0.1
     df['stochrsi_cross_down'] = df['stochrsi'].diff() < -0.1
-
-    # ADX without plus_di/minus_di fallback
-    df['adx'] = adx(df['high'], df['low'], df['close'], window=14)
-    df['adx_trending'] = df['adx'] > 20
+    df['tsi_bullish'] = df['tsi'] > 0
+    df['tsi_bearish'] = df['tsi'] < 0
 
     # Supertrend
     df['supertrend_bull'] = df['close'] > df['high'].rolling(10).mean()
@@ -139,11 +138,12 @@ def apply_indicators(df):
     period26_low = df['low'].rolling(window=26).min()
     kijun_sen = (period26_high + period26_low) / 2
     senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-    period52_high = df['high'].rolling(window=52).max()
-    period52_low = df['low'].rolling(window=52).min()
+    period52_high = df['high'].rolling(52).max()
+    period52_low = df['low'].rolling(52).min()
     senkou_span_b = ((period52_high + period52_low) / 2).shift(26)
     df['ichimoku_bullish'] = (df['close'] > senkou_span_a) & (df['close'] > senkou_span_b)
     df['ichimoku_bearish'] = (df['close'] < senkou_span_a) & (df['close'] < senkou_span_b)
     df['ichimoku_twist'] = (senkou_span_a - senkou_span_b).abs().diff().rolling(2).mean() < 1e-3
 
     return df
+
