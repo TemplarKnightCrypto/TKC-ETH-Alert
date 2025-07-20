@@ -5,100 +5,80 @@ import datetime
 import pandas as pd
 import numpy as np
 from discord.ext import commands, tasks
-from flask import Flask
-import threading
-from ta.trend import ema_indicator, macd_diff
+from ta.trend import ema_indicator
 from ta.momentum import rsi, stochrsi
 from ta.volatility import bollinger_hband, bollinger_lband, average_true_range
 from ta.volume import on_balance_volume
+from dotenv import load_dotenv
 
-# Load .env if available
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+load_dotenv()
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 alert_channel_id = None
 
-# === FLASK SETUP TO KEEP ALIVE ===
-app = Flask('')
-@app.route('/')
-def home():
-    return "Bot is running!"
-def run():
-    app.run(host='0.0.0.0', port=8080)
-threading.Thread(target=run).start()
-
-# === DATA FETCHING ===
+# === Primary (Binance) → Fallback (Bybit) ===
 def get_eth_data():
-    def try_binance():
+    try:
+        # === Binance ===
         url = 'https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit=200'
         response = requests.get(url)
         print(f"Binance API status: {response.status_code}")
-        if response.status_code != 200:
-            raise Exception(f"Binance Non-200 response: {response.status_code}")
-        return response.json()
-
-    def try_bybit():
-        url = "https://api.bybit.com/v5/market/kline"
-        params = {"category": "linear", "symbol": "ETHUSDT", "interval": "5", "limit": 200}
-        response = requests.get(url, params=params)
-        print(f"Bybit API status: {response.status_code}")
-        if response.status_code != 200:
-            raise Exception(f"Bybit Non-200 response: {response.status_code}")
-        return [[
-            int(item['start']), item['open'], item['high'], item['low'], item['close'], item['volume']
-        ] for item in response.json()['result']['list']]
-
-    def try_coingecko():
-        url = "https://api.coingecko.com/api/v3/coins/ethereum/market_chart"
-        params = {"vs_currency": "usd", "days": "1", "interval": "minutely"}
-        response = requests.get(url, params=params)
-        print(f"CoinGecko API status: {response.status_code}")
-        if response.status_code != 200:
-            raise Exception("CoinGecko API error")
-        prices = response.json()['prices']
-        return [[t, p, p, p, p, 0] for t, p in prices]
-
-    try:
+        if response.status_code == 200:
+            return parse_binance_data(response.json())
+        raise Exception("Binance unavailable")
+    except:
         try:
-            data = try_binance()
-        except:
-            try:
-                data = try_bybit()
-            except:
-                data = try_coingecko()
+            # === Bybit ===
+            url = "https://api.bybit.com/v5/market/kline"
+            params = {"category": "linear", "symbol": "ETHUSDT", "interval": "5", "limit": 200}
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(url, params=params, headers=headers)
+            print(f"Bybit API status: {response.status_code}")
+            if response.status_code == 200:
+                return parse_bybit_data(response.json()['result']['list'])
+            raise Exception("Bybit unavailable")
+        except Exception as e:
+            print("Error fetching data:", e)
+            return None
 
-        if not data or len(data) < 20:
-            raise Exception("Insufficient data")
+def parse_binance_data(data):
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume',
+                                     'close_time', 'quote_asset_volume', 'num_trades',
+                                     'taker_buy_base_volume', 'taker_buy_quote_volume', 'ignore'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['close'] = df['close'].astype(float)
+    df['high'] = df['high'].astype(float)
+    df['low'] = df['low'].astype(float)
+    df['volume'] = df['volume'].astype(float)
+    return add_indicators(df)
 
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+def parse_bybit_data(data):
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['close'] = df['close'].astype(float)
+    df['high'] = df['high'].astype(float)
+    df['low'] = df['low'].astype(float)
+    df['volume'] = df['volume'].astype(float)
+    return add_indicators(df)
 
-        df['ema50'] = ema_indicator(df['close'], window=50)
-        df['rsi'] = rsi(df['close'], window=14)
-        df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
-        df['macd_signal'] = df['macd'].ewm(span=9).mean()
-        df['obv'] = on_balance_volume(df['close'], df['volume'])
-        df['atr'] = average_true_range(df['high'], df['low'], df['close'], window=14)
-        df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
-        df['stoch_rsi'] = stochrsi(df['close'], window=14, smooth1=3, smooth2=3)
-        df['bb_upper'] = bollinger_hband(df['close'], window=20, window_dev=2)
-        df['bb_lower'] = bollinger_lband(df['close'], window=20, window_dev=2)
-        df['donchian_low'] = df['low'].rolling(window=20).min()
-        df['donchian_high'] = df['high'].rolling(window=20).max()
-        return df
-    except Exception as e:
-        print("Error fetching data:", e)
-        return None
+def add_indicators(df):
+    df['ema50'] = ema_indicator(df['close'], window=50)
+    df['rsi'] = rsi(df['close'], window=14)
+    df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
+    df['macd_signal'] = df['macd'].ewm(span=9).mean()
+    df['obv'] = on_balance_volume(df['close'], df['volume'].fillna(0))
+    df['atr'] = average_true_range(df['high'], df['low'], df['close'], window=14)
+    df['vwap'] = (df['volume'].fillna(0) * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].fillna(1).cumsum()
+    df['stoch_rsi'] = stochrsi(df['close'], window=14, smooth1=3, smooth2=3)
+    df['bb_upper'] = bollinger_hband(df['close'], window=20, window_dev=2)
+    df['bb_lower'] = bollinger_lband(df['close'], window=20, window_dev=2)
+    df['donchian_low'] = df['low'].rolling(window=20).min()
+    df['donchian_high'] = df['high'].rolling(window=20).max()
+    return df
 
-# === TRADE MONITORING ===
+# === MONITORING ===
 @tasks.loop(minutes=5)
 async def monitor_price():
     global alert_channel_id
@@ -153,13 +133,12 @@ async def monitor_price():
     except Exception as e:
         print("Monitoring error:", e)
 
-# === STARTUP ===
+# === DISCORD COMMANDS ===
 @bot.event
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     monitor_price.start()
 
-# === COMMANDS ===
 @bot.command(name="setchannel")
 async def setchannel(ctx):
     global alert_channel_id
@@ -186,7 +165,8 @@ async def status(ctx):
     macd = df['macd'].iloc[-1]
     macd_signal = df['macd_signal'].iloc[-1]
     stoch_rsi = df['stoch_rsi'].iloc[-1]
-    await ctx.send(f"""📊 **ETH Strategy Status**
+    await ctx.send(f"""\
+📊 **ETH Strategy Status**
 Price: ${price:,.2f}
 RSI: {rsi_val:.2f}
 MACD: {macd:.4f}
