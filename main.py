@@ -163,4 +163,53 @@ async def setchannel(ctx):
     alert_channel_id = ctx.channel.id
     await ctx.send(f"✅ Alerts will be sent to this channel.")
 
+@bot.command()
+async def price(ctx):
+    try:
+        price = get_eth_data()['close'].iloc[-1]
+        await ctx.send(f"💰 ETH Price: ${price:,.2f}")
+    except:
+        await ctx.send("⚠️ Could not fetch ETH price.")
+
+@bot.command()
+async def status(ctx):
+    try:
+        df = get_eth_data()
+        current_price = df['close'].iloc[-1]
+        ema50 = df['ema50'].iloc[-1]
+        rsi_val = df['rsi'].iloc[-1]
+        macd = df['macd'].iloc[-1]
+        macd_signal_val = df['macd_signal'].iloc[-1]
+        obv_slope = df['obv'].iloc[-1] - df['obv'].iloc[-5]
+        atr_now = df['atr'].iloc[-1]
+        vwap_val = df['vwap'].iloc[-1]
+        stoch_rsi_val = df['stoch_rsi'].iloc[-1]
+        donchian_low = df['donchian_low'].iloc[-1]
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        await ctx.send(f"""📊 **ETH Manual Status Update**\n🕒 {now}
+
+💰 **Price:** ${current_price:,.2f}
+📈 EMA50: ${ema50:,.2f}
+📉 VWAP: ${vwap_val:,.2f}
+📊 RSI: {rsi_val:.2f}
+📶 MACD: {macd:.4f} | Signal: {macd_signal_val:.4f}
+📈 OBV Trend: {'Up' if obv_slope > 0 else 'Down'}
+🔄 Stoch RSI: {stoch_rsi_val:.2f}
+📊 Donchian Low: ${donchian_low:.2f}
+📏 ATR: {atr_now:.2f}""")
+    except:
+        await ctx.send("⚠️ Could not generate status update.")
+
+@bot.command()
+async def help(ctx):
+    await ctx.send("""📘 **Available Commands:**
+
+!setchannel - Set this channel to receive alerts
+!price - Show current ETH price
+!status - Manual ETH strategy status update
+!help - Show this command list
+""")
+
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
