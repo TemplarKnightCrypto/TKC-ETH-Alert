@@ -60,7 +60,7 @@ async def commands(ctx):
 
 @tasks.loop(minutes=30)
 async def monitor_price():
-    global alert_channel_id
+    global alert_channel_id, last_alert_time
     if not alert_channel_id:
         return
     channel = bot.get_channel(alert_channel_id)
@@ -68,7 +68,10 @@ async def monitor_price():
     if df is not None and not df.empty:
         signal_msg = format_alerts(df)
         if signal_msg:
-            await channel.send(signal_msg)
+            now = datetime.datetime.now()
+            if not last_alert_time or (now - last_alert_time).seconds > ALERT_COOLDOWN_MINUTES * 60:
+                last_alert_time = now
+                await channel.send(signal_msg)
 
 # =============== Data and Signal Logic ===============
 def get_eth_data():
@@ -146,4 +149,28 @@ def apply_indicators(df):
     df['ichimoku_twist'] = (senkou_span_a - senkou_span_b).abs().diff().rolling(2).mean() < 1e-3
 
     return df
+
+def format_alerts(df):
+    latest = df.iloc[-1]
+    msg = f"""
+📊 **ETH Strategy Status**
+
+💰 Price: ${latest['close']:,.2f}
+📈 RSI: {latest['rsi']:.2f}
+📉 MACD: {latest['macd']:.4f} | Signal: {latest['signal']:.4f}
+📊 Stoch RSI: {latest['stochrsi']:.2f}
+📊 EMA50: ${latest['ema50']:,.2f}
+📶 OBV: {'📈 Bullish' if latest['tsi_bullish'] else '📉 Bearish'}
+
+🧠 Supertrend: {'🟢 Bullish' if latest['supertrend_bull'] else '🔴 Bearish' if latest['supertrend_bear'] else '⚪ Neutral'}
+🐊 Alligator: {'🟢 Bullish' if latest['alligator_bullish'] else '🔴 Bearish' if latest['alligator_bearish'] else '⚪ Neutral'}
+☁️ Ichimoku: {'🟢 Bullish' if latest['ichimoku_bullish'] else '🔴 Bearish' if latest['ichimoku_bearish'] else '⚪ Neutral'}
+🌪️ Twist Alert: {'⚠️ Twist detected' if latest['ichimoku_twist'] else '✅ Stable'}
+
+Market Bias: {'🟢 Bullish' if latest['ema_cross_up'] else '🔴 Bearish'}
+"""
+    return msg
+
+if __name__ == "__main__":
+    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
 
