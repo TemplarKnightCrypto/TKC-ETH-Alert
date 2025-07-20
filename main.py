@@ -21,7 +21,6 @@ alert_channel_id = None
 # === Primary (Binance) → Fallback (Bybit) ===
 def get_eth_data():
     try:
-        # === Binance ===
         url = 'https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit=200'
         response = requests.get(url)
         print(f"Binance API status: {response.status_code}")
@@ -30,7 +29,6 @@ def get_eth_data():
         raise Exception("Binance unavailable")
     except:
         try:
-            # === Bybit ===
             url = "https://api.bybit.com/v5/market/kline"
             params = {"category": "linear", "symbol": "ETHUSDT", "interval": "5", "limit": 200}
             headers = {"User-Agent": "Mozilla/5.0"}
@@ -76,11 +74,26 @@ def add_indicators(df):
     df['bb_lower'] = bollinger_lband(df['close'], window=20, window_dev=2)
     df['donchian_low'] = df['low'].rolling(window=20).min()
     df['donchian_high'] = df['high'].rolling(window=20).max()
+    df['bb_width'] = df['bb_upper'] - df['bb_lower']
+    df['macd_cross'] = np.where(df['macd'] > df['macd_signal'], 1, 0)
+    df['rsi_overbought'] = df['rsi'] > 70
+    df['rsi_oversold'] = df['rsi'] < 30
+    df['stochrsi_cross_up'] = (df['stoch_rsi'] > 0.2) & (df['stoch_rsi'].shift(1) <= 0.2)
+    df['stochrsi_cross_down'] = (df['stoch_rsi'] < 0.8) & (df['stoch_rsi'].shift(1) >= 0.8)
     return df
 
 # === MONITORING ===
 @tasks.loop(minutes=5)
 async def monitor_price():
+    await check_strategy_alert()
+
+@tasks.loop(minutes=30)
+async def periodic_status():
+    if alert_channel_id:
+        channel = bot.get_channel(alert_channel_id)
+        await send_status(channel)
+
+async def check_strategy_alert():
     global alert_channel_id
     if not alert_channel_id:
         return
@@ -102,6 +115,7 @@ async def monitor_price():
         bb_upper = df['bb_upper'].iloc[-1]
         bb_lower = df['bb_lower'].iloc[-1]
         donchian_low = df['donchian_low'].iloc[-1]
+        bb_width = df['bb_width'].iloc[-1]
 
         message = None
 
@@ -126,6 +140,21 @@ async def monitor_price():
         ):
             message = f"⚠️ **ETH Bearish Breakdown Detected**\nPrice: ${current_price:,.2f}"
 
+        elif df['rsi_overbought'].iloc[-1]:
+            message = f"🔺 **RSI Overbought Alert**\nRSI: {rsi_val:.2f}"
+
+        elif df['rsi_oversold'].iloc[-1]:
+            message = f"🔻 **RSI Oversold Alert**\nRSI: {rsi_val:.2f}"
+
+        elif df['stochrsi_cross_up'].iloc[-1]:
+            message = f"🔄 **Stoch RSI Upturn Alert**\nStoch RSI: {stoch_rsi_val:.2f}"
+
+        elif df['stochrsi_cross_down'].iloc[-1]:
+            message = f"⏬ **Stoch RSI Downturn Alert**\nStoch RSI: {stoch_rsi_val:.2f}"
+
+        elif bb_width < df['bb_width'].rolling(window=20).mean().iloc[-1] * 0.5:
+            message = f"📉 **Bollinger Band Squeeze Alert**\nLow volatility detected."
+
         if message:
             channel = bot.get_channel(alert_channel_id)
             await channel.send(message)
@@ -133,11 +162,49 @@ async def monitor_price():
     except Exception as e:
         print("Monitoring error:", e)
 
+# === STATUS COMMAND AND SCHEDULER ===
+async def send_status(channel):
+    df = get_eth_data()
+    if df is None or len(df) < 20:
+        await channel.send("⚠️ Could not generate status update.")
+        return
+
+    price = df['close'].iloc[-1]
+    rsi_val = df['rsi'].iloc[-1]
+    macd = df['macd'].iloc[-1]
+    macd_signal = df['macd_signal'].iloc[-1]
+    stoch_rsi = df['stoch_rsi'].iloc[-1]
+    ema50 = df['ema50'].iloc[-1]
+    vwap = df['vwap'].iloc[-1]
+    obv_trend = df['obv'].iloc[-1] - df['obv'].iloc[-5] if len(df) > 5 else 0
+
+    summary = ""
+    if price > ema50 and macd > macd_signal and rsi_val > 50:
+        summary = "📈 Market Bias: Bullish"
+    elif price < ema50 and macd < macd_signal and rsi_val < 40:
+        summary = "📉 Market Bias: Bearish"
+    else:
+        summary = "⚖️ Market Bias: Neutral"
+
+    await channel.send(f"""
+📊 **ETH Strategy Status**
+Price: ${price:,.2f}
+RSI: {rsi_val:.2f}
+MACD: {macd:.4f}
+Signal: {macd_signal:.4f}
+Stoch RSI: {stoch_rsi:.2f}
+EMA50: ${ema50:,.2f}
+VWAP: ${vwap:,.2f}
+OBV Trend: {'⬆️' if obv_trend > 0 else '⬇️'}
+{summary}
+""")
+
 # === DISCORD COMMANDS ===
 @bot.event
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     monitor_price.start()
+    periodic_status.start()
 
 @bot.command(name="setchannel")
 async def setchannel(ctx):
@@ -156,23 +223,7 @@ async def price(ctx):
 
 @bot.command(name="status")
 async def status(ctx):
-    df = get_eth_data()
-    if df is None or len(df) < 20:
-        await ctx.send("⚠️ Could not generate status update.")
-        return
-    price = df['close'].iloc[-1]
-    rsi_val = df['rsi'].iloc[-1]
-    macd = df['macd'].iloc[-1]
-    macd_signal = df['macd_signal'].iloc[-1]
-    stoch_rsi = df['stoch_rsi'].iloc[-1]
-    await ctx.send(f"""\
-📊 **ETH Strategy Status**
-Price: ${price:,.2f}
-RSI: {rsi_val:.2f}
-MACD: {macd:.4f}
-Signal: {macd_signal:.4f}
-Stoch RSI: {stoch_rsi:.2f}
-""")
+    await send_status(ctx.channel)
 
 @bot.command(name="commands")
 async def commands(ctx):
