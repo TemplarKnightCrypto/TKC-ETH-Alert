@@ -12,12 +12,12 @@ from ta.momentum import rsi, stochrsi
 from ta.volatility import bollinger_hband, bollinger_lband, average_true_range
 from ta.volume import on_balance_volume
 
-# Optional dotenv support for local development
+# Load .env if available
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    print("dotenv not found, continuing without it (Render handles env vars)")
+    pass
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -35,26 +35,51 @@ threading.Thread(target=run).start()
 
 # === DATA FETCHING ===
 def get_eth_data():
-    url = 'https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit=200'
-    try:
+    def try_binance():
+        url = 'https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit=200'
         response = requests.get(url)
         print(f"Binance API status: {response.status_code}")
         if response.status_code != 200:
-            raise Exception(f"Non-200 response: {response.status_code}")
-        data = response.json()
+            raise Exception(f"Binance Non-200 response: {response.status_code}")
+        return response.json()
+
+    def try_bybit():
+        url = "https://api.bybit.com/v5/market/kline"
+        params = {"category": "linear", "symbol": "ETHUSDT", "interval": "5", "limit": 200}
+        response = requests.get(url, params=params)
+        print(f"Bybit API status: {response.status_code}")
+        if response.status_code != 200:
+            raise Exception(f"Bybit Non-200 response: {response.status_code}")
+        return [[
+            int(item['start']), item['open'], item['high'], item['low'], item['close'], item['volume']
+        ] for item in response.json()['result']['list']]
+
+    def try_coingecko():
+        url = "https://api.coingecko.com/api/v3/coins/ethereum/market_chart"
+        params = {"vs_currency": "usd", "days": "1", "interval": "minutely"}
+        response = requests.get(url, params=params)
+        print(f"CoinGecko API status: {response.status_code}")
+        if response.status_code != 200:
+            raise Exception("CoinGecko API error")
+        prices = response.json()['prices']
+        return [[t, p, p, p, p, 0] for t, p in prices]
+
+    try:
+        try:
+            data = try_binance()
+        except:
+            try:
+                data = try_bybit()
+            except:
+                data = try_coingecko()
+
         if not data or len(data) < 20:
-            raise Exception("Insufficient candle data from Binance.")
+            raise Exception("Insufficient data")
 
         df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'num_trades',
-            'taker_buy_base_volume', 'taker_buy_quote_volume', 'ignore'])
-
+            'timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df['close'] = df['close'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['volume'] = df['volume'].astype(float)
+        df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
 
         df['ema50'] = ema_indicator(df['close'], window=50)
         df['rsi'] = rsi(df['close'], window=14)
@@ -70,7 +95,7 @@ def get_eth_data():
         df['donchian_high'] = df['high'].rolling(window=20).max()
         return df
     except Exception as e:
-        print("Error fetching data from Binance:", e)
+        print("Error fetching data:", e)
         return None
 
 # === TRADE MONITORING ===
