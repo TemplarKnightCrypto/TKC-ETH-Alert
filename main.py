@@ -76,7 +76,6 @@ async def monitor_price():
         bb_upper = df['bb_upper'].iloc[-1]
         bb_lower = df['bb_lower'].iloc[-1]
         donchian_low = df['donchian_low'].iloc[-1]
-        donchian_high = df['donchian_high'].iloc[-1]
 
         message = None
 
@@ -98,7 +97,7 @@ async def monitor_price():
             rsi_val < 40 and
             macd < macd_signal_val and
             obv_slope < 0 and
-            current_price < donchian_low or current_price < bb_lower and
+            (current_price < donchian_low or current_price < bb_lower) and
             atr_now > df['atr'].iloc[-5]
         ):
             message = f"⚠️ **ETH Bearish Breakdown Detected**\nPrice: ${current_price:,.2f}"
@@ -127,8 +126,6 @@ async def status_update():
         atr_now = df['atr'].iloc[-1]
         vwap_val = df['vwap'].iloc[-1]
         stoch_rsi_val = df['stoch_rsi'].iloc[-1]
-        bb_upper = df['bb_upper'].iloc[-1]
-        bb_lower = df['bb_lower'].iloc[-1]
         donchian_low = df['donchian_low'].iloc[-1]
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -201,14 +198,14 @@ async def status(ctx):
     except:
         await ctx.send("⚠️ Could not generate status update.")
 
-@bot.command()
-async def help(ctx):
+@bot.command(name="commands")
+async def show_commands(ctx):
     await ctx.send("""📘 **Available Commands:**
 
 !setchannel - Set this channel to receive alerts
 !price - Show current ETH price
 !status - Manual ETH strategy status update
-!help - Show this command list
+!commands - Show this command list
 """)
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
