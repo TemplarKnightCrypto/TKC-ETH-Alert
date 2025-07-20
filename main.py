@@ -106,6 +106,7 @@ async def ethmoves(ctx):
     if df is None:
         await ctx.send("⚠️ Could not fetch ETH data.")
         return
+
     moves = []
     for i in range(len(df)):
         entry_price = df.iloc[i]['close']
@@ -122,38 +123,33 @@ async def ethmoves(ctx):
             elif low <= target_down:
                 moves.append((entry_time, entry_price, exit_time, low, "Down"))
                 break
+
     if not moves:
         await ctx.send("📉 No 1% ETH moves detected in the last 24 hours.")
         return
-    message = "**📊 ETH 1% Move Summary (4hr candles)**\n"
+
+    header = "**📊 ETH 1% Move Summary (4hr candles)**\n"
+    message = header
     for m in moves:
         entry_time, entry_price, exit_time, exit_price, direction = m
-        message += (
+        section = (
             f"\n🔹 Direction: {direction}\n"
             f"• Entry: ${entry_price:.2f} at {entry_time.strftime('%b %d %I:%M %p')}\n"
             f"• Exit: ${exit_price:.2f} at {exit_time.strftime('%b %d %I:%M %p')}\n"
             f"• Δ: {exit_price - entry_price:+.2f} ({(exit_price - entry_price) / entry_price * 100:.2f}%)\n"
         )
-    await ctx.send(message)
+        if len(message) + len(section) > 1900:
+            await ctx.send(message)
+            message = section
+        else:
+            message += section
+
+    if message.strip() and message != header:
+        await ctx.send(message)
+
 
 def get_eth_data(interval='5', limit=200):
     try:
-        url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol=ETHUSDT&interval={interval}&limit={limit}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json().get("result", {}).get("list", [])
-            if data:
-                df = pd.DataFrame(data, columns=["time", "open", "high", "low", "close", "volume", "turnover"])
-                df['time'] = pd.to_datetime(df['time'].astype(float), unit='s')
-                df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
-                df = df[['time','open','high','low','close','volume']]
-                return apply_indicators(df)
-            else:
-                print("⚠️ Bybit returned empty data.")
-        else:
-            print(f"❌ Bybit API Error {response.status_code}: {response.text}")
-
-        # FALLBACK: Kraken
         symbol_map = {'ETHUSDT': 'XETHZUSD'}
         pair = symbol_map.get('ETHUSDT', 'XETHZUSD')
         url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval}"
@@ -163,17 +159,13 @@ def get_eth_data(interval='5', limit=200):
             key = next(k for k in data if k != 'last')
             candles = data[key]
             df = pd.DataFrame(candles, columns=["time", "open", "high", "low", "close", "vwap", "volume", "count"])
-            df['time'] = pd.to_datetime(df['time'].astype(float), unit='s')
+            df['time'] = pd.to_datetime(df['time'].astype(float), unit='s', utc=True)
             df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
             df = df[['time','open','high','low','close','volume']]
             return apply_indicators(df)
-        else:
-            print(f"❌ Kraken API Error {response.status_code}: {response.text}")
-
     except Exception as e:
-        print("❌ Exception while fetching ETH data:", e)
-
-    return None
+        print("Error fetching data:", e)
+        return None
 
 def apply_indicators(df):
     df['ema50'] = ema_indicator(df['close'], window=50)
@@ -251,3 +243,4 @@ def generate_summary(df, timeframe='Daily'):
 
 if __name__ == "__main__":
     bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
