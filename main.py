@@ -1,6 +1,3 @@
-from dotenv import load_dotenv
-load_dotenv()
-
 import os
 import discord
 import requests
@@ -14,6 +11,13 @@ from ta.trend import ema_indicator, macd_diff
 from ta.momentum import rsi, stochrsi
 from ta.volatility import bollinger_hband, bollinger_lband, average_true_range
 from ta.volume import on_balance_volume
+
+# Optional dotenv support for local development
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("dotenv not found, continuing without it (Render handles env vars)")
 
 intents = discord.Intents.default()
 intents.message_content = True
