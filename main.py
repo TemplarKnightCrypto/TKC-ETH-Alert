@@ -7,196 +7,160 @@ import numpy as np
 from discord.ext import commands, tasks
 from flask import Flask
 import threading
-from ta.trend import ema_indicator
-from ta.momentum import rsi
-from ta.volatility import average_true_range
+from ta.trend import ema_indicator, macd_diff
+from ta.momentum import rsi, stochrsi
+from ta.volatility import bollinger_hband, bollinger_lband, average_true_range
+from ta.volume import on_balance_volume
 
-# === Flask Uptime Server ===
-app = Flask(__name__)
-@app.route('/')
-def home():
-    return "Bot is live!"
-
-def run_flask():
-    app.run(host="0.0.0.0", port=8000)
-
-flask_thread = threading.Thread(target=run_flask)
-flask_thread.start()
-
-# === Discord Setup ===
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# === Binance API Endpoints ===
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit=100"
-BINANCE_PRICE = "https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"
-
-# === Strategy State ===
-alert_sent = False
 alert_channel_id = None
 
-# === Indicator Calculation ===
+# === FLASK SETUP TO KEEP ALIVE ===
+app = Flask('')
+@app.route('/')
+def home():
+    return "Bot is running!"
+def run():
+    app.run(host='0.0.0.0', port=8080)
+threading.Thread(target=run).start()
+
+# === DATA FETCHING ===
 def get_eth_data():
-    res = requests.get(BINANCE_KLINES)
-    data = res.json()
+    url = 'https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=5m&limit=200'
+    response = requests.get(url)
+    data = response.json()
     df = pd.DataFrame(data, columns=[
-        'time', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'quote_asset_volume', 'trades',
-        'taker_buy_base', 'taker_buy_quote', 'ignore'
-    ])
-    df['time'] = pd.to_datetime(df['time'], unit='ms')
-    df = df[['time', 'open', 'high', 'low', 'close', 'volume']].astype(float)
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_asset_volume', 'num_trades',
+        'taker_buy_base_volume', 'taker_buy_quote_volume', 'ignore'])
+
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['close'] = df['close'].astype(float)
+    df['high'] = df['high'].astype(float)
+    df['low'] = df['low'].astype(float)
+    df['volume'] = df['volume'].astype(float)
+
     df['ema50'] = ema_indicator(df['close'], window=50)
     df['rsi'] = rsi(df['close'], window=14)
+    df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
+    df['macd_signal'] = df['macd'].ewm(span=9).mean()
+    df['obv'] = on_balance_volume(df['close'], df['volume'])
     df['atr'] = average_true_range(df['high'], df['low'], df['close'], window=14)
+    df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
+    df['stoch_rsi'] = stochrsi(df['close'], window=14, smooth1=3, smooth2=3)
+    df['bb_upper'] = bollinger_hband(df['close'], window=20, window_dev=2)
+    df['bb_lower'] = bollinger_lband(df['close'], window=20, window_dev=2)
+    df['donchian_low'] = df['low'].rolling(window=20).min()
+    df['donchian_high'] = df['high'].rolling(window=20).max()
     return df
 
-def get_current_price():
-    try:
-        res = requests.get(BINANCE_PRICE)
-        return float(res.json()['price'])
-    except:
-        return None
-
-# === Strategy Logic ===
-def analyze_strategy(df):
-    global alert_sent
-    current_price = df['close'].iloc[-1]
-    ema50 = df['ema50'].iloc[-1]
-    rsi_val = df['rsi'].iloc[-1]
-    atr_val = df['atr'].iloc[-1]
-    atr_change = df['atr'].iloc[-1] - df['atr'].iloc[-5]
-
-    swing_high = df['high'].iloc[-20:].max()
-    swing_low = df['low'].iloc[-20:].min()
-    fib_0_382 = swing_low + 0.382 * (swing_high - swing_low)
-    fib_0_618 = swing_low + 0.618 * (swing_high - swing_low)
-
-    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    # === Long: Breakout ===
-    if current_price > ema50 and rsi_val > 60 and atr_change > 0 and not alert_sent:
-        stop = round(current_price - 1.5 * atr_val, 2)
-        tp = round(current_price + 2.0 * atr_val, 2)
-        rr = round((tp - current_price) / (current_price - stop), 2)
-        alert_sent = True
-        return f"""🟢 **ETH Breakout Long**
-
-💰 Price: ${current_price:,.2f}
-📈 EMA50: ${ema50:,.2f}
-📊 RSI: {rsi_val:.2f}
-📶 ATR Increasing: ✅
-
-🛑 Stop Loss: ${stop}
-🎯 Take Profit: ${tp}
-📏 Risk/Reward: {rr}:1
-
-🕒 {now}"""
-
-    # === Long: Pullback ===
-    elif fib_0_382 <= current_price <= fib_0_618 and current_price > ema50 and rsi_val < 40 and not alert_sent:
-        stop = round(current_price - 1.2 * atr_val, 2)
-        tp = round(current_price + 1.8 * atr_val, 2)
-        rr = round((tp - current_price) / (current_price - stop), 2)
-        alert_sent = True
-        return f"""🟢 **ETH Pullback Long**
-
-💰 Price: ${current_price:,.2f}
-📉 Fib Zone: ${fib_0_382:,.2f} – ${fib_0_618:,.2f}
-📊 RSI: {rsi_val:.2f}
-📈 Trend: Above EMA50 ✅
-
-🛑 Stop Loss: ${stop}
-🎯 Take Profit: ${tp}
-📏 Risk/Reward: {rr}:1
-
-🕒 {now}"""
-
-    # === Short: Breakdown ===
-    elif current_price < ema50 and rsi_val < 40 and atr_change > 0 and not alert_sent:
-        stop = round(current_price + 1.5 * atr_val, 2)
-        tp = round(current_price - 2.0 * atr_val, 2)
-        rr = round((current_price - tp) / (stop - current_price), 2)
-        alert_sent = True
-        return f"""🔴 **ETH Breakdown Short**
-
-💰 Price: ${current_price:,.2f}
-📉 EMA50: ${ema50:,.2f}
-📊 RSI: {rsi_val:.2f}
-📶 ATR Increasing: ✅
-
-🛑 Stop Loss: ${stop}
-🎯 Take Profit: ${tp}
-📏 Risk/Reward: {rr}:1
-
-🕒 {now}"""
-
-    # === Short: Pullback ===
-    elif fib_0_382 <= current_price <= fib_0_618 and current_price < ema50 and rsi_val > 60 and not alert_sent:
-        stop = round(current_price + 1.2 * atr_val, 2)
-        tp = round(current_price - 1.8 * atr_val, 2)
-        rr = round((current_price - tp) / (stop - current_price), 2)
-        alert_sent = True
-        return f"""🔴 **ETH Pullback Short**
-
-💰 Price: ${current_price:,.2f}
-📈 Fib Zone: ${fib_0_382:,.2f} – ${fib_0_618:,.2f}
-📊 RSI: {rsi_val:.2f}
-📉 Trend: Below EMA50 ✅
-
-🛑 Stop Loss: ${stop}
-🎯 Take Profit: ${tp}
-📏 Risk/Reward: {rr}:1
-
-🕒 {now}"""
-
-    return None
-
-# === Monitoring Task ===
-@tasks.loop(seconds=60)
+# === TRADE MONITORING ===
+@tasks.loop(minutes=5)
 async def monitor_price():
     global alert_channel_id
     if not alert_channel_id:
         return
     try:
         df = get_eth_data()
-        signal = analyze_strategy(df)
-        if signal:
-            channel = bot.get_channel(alert_channel_id)
-            price = get_current_price()
-            if price:
-                await channel.send(f"📡 **ETH Price:** ${price:,.2f}")
-            await channel.send(signal)
-    except Exception as e:
-        print("Monitor error:", e)
+        current_price = df['close'].iloc[-1]
+        ema50 = df['ema50'].iloc[-1]
+        rsi_val = df['rsi'].iloc[-1]
+        macd = df['macd'].iloc[-1]
+        macd_signal_val = df['macd_signal'].iloc[-1]
+        obv_slope = df['obv'].iloc[-1] - df['obv'].iloc[-5]
+        atr_now = df['atr'].iloc[-1]
+        vwap_val = df['vwap'].iloc[-1]
+        stoch_rsi_val = df['stoch_rsi'].iloc[-1]
+        bb_upper = df['bb_upper'].iloc[-1]
+        bb_lower = df['bb_lower'].iloc[-1]
+        donchian_low = df['donchian_low'].iloc[-1]
+        donchian_high = df['donchian_high'].iloc[-1]
 
-# === Bot Events and Commands ===
+        message = None
+
+        # Bullish Scenario
+        if (
+            current_price > ema50 and
+            current_price > vwap_val and
+            macd > macd_signal_val and
+            obv_slope > 0 and
+            rsi_val > 50 and
+            stoch_rsi_val > 0.8 and
+            current_price > bb_upper
+        ):
+            message = f"🚀 **ETH Bullish Breakout Detected**\nPrice: ${current_price:,.2f}"
+
+        # Bearish Scenario
+        elif (
+            current_price < ema50 and
+            rsi_val < 40 and
+            macd < macd_signal_val and
+            obv_slope < 0 and
+            current_price < donchian_low or current_price < bb_lower and
+            atr_now > df['atr'].iloc[-5]
+        ):
+            message = f"⚠️ **ETH Bearish Breakdown Detected**\nPrice: ${current_price:,.2f}"
+
+        if message:
+            channel = bot.get_channel(alert_channel_id)
+            await channel.send(message)
+
+    except Exception as e:
+        print("Monitoring error:", e)
+
+# === STATUS UPDATE ===
+@tasks.loop(minutes=30)
+async def status_update():
+    global alert_channel_id
+    if not alert_channel_id:
+        return
+    try:
+        df = get_eth_data()
+        current_price = df['close'].iloc[-1]
+        ema50 = df['ema50'].iloc[-1]
+        rsi_val = df['rsi'].iloc[-1]
+        macd = df['macd'].iloc[-1]
+        macd_signal_val = df['macd_signal'].iloc[-1]
+        obv_slope = df['obv'].iloc[-1] - df['obv'].iloc[-5]
+        atr_now = df['atr'].iloc[-1]
+        vwap_val = df['vwap'].iloc[-1]
+        stoch_rsi_val = df['stoch_rsi'].iloc[-1]
+        bb_upper = df['bb_upper'].iloc[-1]
+        bb_lower = df['bb_lower'].iloc[-1]
+        donchian_low = df['donchian_low'].iloc[-1]
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        channel = bot.get_channel(alert_channel_id)
+        await channel.send(f"""📊 **ETH Market Status Update**\n🕒 {now}
+
+💰 **Price:** ${current_price:,.2f}
+📈 EMA50: ${ema50:,.2f}
+📉 VWAP: ${vwap_val:,.2f}
+📊 RSI: {rsi_val:.2f}
+📶 MACD: {macd:.4f} | Signal: {macd_signal_val:.4f}
+📈 OBV Trend: {'Up' if obv_slope > 0 else 'Down'}
+🔄 Stoch RSI: {stoch_rsi_val:.2f}
+📊 Donchian Low: ${donchian_low:.2f}
+📏 ATR: {atr_now:.2f}
+
+⚠️ *This is not a trade alert — just a current strategy status update.*
+""")
+    except Exception as e:
+        print("Status update error:", e)
+
+# === BOT EVENTS ===
 @bot.event
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     monitor_price.start()
+    status_update.start()
 
-@bot.command(name="setchannel")
+@bot.command()
 async def setchannel(ctx):
     global alert_channel_id
     alert_channel_id = ctx.channel.id
-    await ctx.send("📡 This channel is now set for live ETH alerts.")
+    await ctx.send(f"✅ Alerts will be sent to this channel.")
 
-@bot.command(name="price")
-async def price(ctx):
-    price = get_current_price()
-    if price:
-        await ctx.send(f"💰 ETH Price: ${price:,.2f}")
-    else:
-        await ctx.send("⚠️ Couldn't fetch ETH price.")
-
-@bot.command(name="reset")
-async def reset(ctx):
-    global alert_sent
-    alert_sent = False
-    await ctx.send("🔄 Alert state reset. New alerts will now trigger.")
-
-# === Run Bot ===
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-bot.run(DISCORD_TOKEN)
+bot.run(os.getenv("DISCORD_BOT_TOKEN"))
