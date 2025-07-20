@@ -5,9 +5,9 @@ import datetime
 import pandas as pd
 import numpy as np
 from discord.ext import commands, tasks
-from ta.trend import ema_indicator, adx, plus_di, minus_di
+from ta.trend import ema_indicator, adx
 from ta.momentum import rsi, stochrsi
-from ta.volatility import bollinger_hband, bollinger_lband, average_true_range
+from ta.volatility import average_true_range
 from ta.volume import on_balance_volume
 from dotenv import load_dotenv
 
@@ -116,13 +116,9 @@ def apply_indicators(df):
     df['stochrsi_cross_up'] = df['stochrsi'].diff() > 0.1
     df['stochrsi_cross_down'] = df['stochrsi'].diff() < -0.1
 
-    # ADX + DI
+    # ADX without plus_di/minus_di fallback
     df['adx'] = adx(df['high'], df['low'], df['close'], window=14)
-    df['plus_di'] = plus_di(df['high'], df['low'], df['close'], window=14)
-    df['minus_di'] = minus_di(df['high'], df['low'], df['close'], window=14)
     df['adx_trending'] = df['adx'] > 20
-    df['adx_bullish'] = df['plus_di'] > df['minus_di']
-    df['adx_bearish'] = df['minus_di'] > df['plus_di']
 
     # Supertrend
     df['supertrend_bull'] = df['close'] > df['high'].rolling(10).mean()
@@ -151,6 +147,3 @@ def apply_indicators(df):
     df['ichimoku_twist'] = (senkou_span_a - senkou_span_b).abs().diff().rolling(2).mean() < 1e-3
 
     return df
-
-# Existing format_alerts logic is used here
-
