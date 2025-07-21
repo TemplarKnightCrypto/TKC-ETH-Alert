@@ -26,7 +26,7 @@ CENTRAL_TZ = pytz.timezone("US/Central")
 app = Flask(__name__)
 
 @app.route('/')
-def home():
+def home():F
     return "Bot is live!"
 
 def run_flask():
@@ -311,6 +311,39 @@ Market Bias: {'🟢 Bullish' if latest['ema_cross_up'] else '🔴 Bearish'}
 """
     return msg
 
+@bot.command()
+async def ethmoves(ctx):
+    df = get_eth_data(interval='240', limit=42)  # 4hr candles
+    if df is None:
+        await ctx.send("⚠️ Could not fetch ETH data.")
+        return
+
+    up_moves, down_moves = 0, 0
+    for i in range(len(df)):
+        entry_price = df.iloc[i]['close']
+        target_up = entry_price * 1.01
+        target_down = entry_price * 0.99
+        for j in range(i+1, len(df)):
+            high = df.iloc[j]['high']
+            low = df.iloc[j]['low']
+            if high >= target_up:
+                up_moves += 1
+                break
+            elif low <= target_down:
+                down_moves += 1
+                break
+
+    total_moves = up_moves + down_moves
+    up_pct = (up_moves / total_moves * 100) if total_moves else 0
+    down_pct = (down_moves / total_moves * 100) if total_moves else 0
+
+    await ctx.send(f"""
+📈 **1% ETH Move Summary (4hr candles)**
+
+🔼 Up Moves: {up_moves} ({up_pct:.1f}%)
+🔽 Down Moves: {down_moves} ({down_pct:.1f}%)
+📊 Total Moves: {total_moves}
+""")
 
 if __name__ == "__main__":
     bot.run(os.getenv("DISCORD_BOT_TOKEN"))
