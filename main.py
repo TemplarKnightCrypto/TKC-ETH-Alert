@@ -26,7 +26,7 @@ CENTRAL_TZ = pytz.timezone("US/Central")
 app = Flask(__name__)
 
 @app.route('/')
-def home():F
+def home():
     return "Bot is live!"
 
 def run_flask():
@@ -44,7 +44,7 @@ async def eth_scan_30min():
     global last_trade_hash
     df = get_eth_data()
     if df is not None:
-        trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df) or detect_camarilla_trade(df)
+        trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
         channel = bot.get_channel(alert_channel_id)
         if channel:
             if trade:
@@ -56,8 +56,6 @@ async def eth_scan_30min():
                 else:
                     print("Duplicate trade detected, skipping alert.")
             await channel.send(format_alerts(df))
-            await channel.send(alligator_water_status(df))
-            await channel.send(ichimoku_cloud_status(df))
         else:
             print("⚠️ Alert channel is not set. Run !setchannel in Discord.")
 
@@ -68,45 +66,94 @@ async def setchannel(ctx):
     await ctx.send("✅ Alerts will be sent to this channel.")
 
 @bot.command()
-async def cloud(ctx):
+async def trade(ctx):
     df = get_eth_data()
     if df is not None:
-        await ctx.send(ichimoku_cloud_status(df))
+        trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
+        if trade:
+            await ctx.send(format_trade_alert(trade))
+        else:
+            await ctx.send("🕵️‍♂️ No active trade setup at this moment.")
     else:
         await ctx.send("⚠️ Could not fetch ETH data.")
 
 @bot.command()
-async def alligator(ctx):
+async def price(ctx):
     df = get_eth_data()
     if df is not None:
-        await ctx.send(alligator_water_status(df))
+        await ctx.send(format_alerts(df))
     else:
         await ctx.send("⚠️ Could not fetch ETH data.")
 
-def ichimoku_cloud_status(df):
-    current = df.iloc[-1]
-    previous = df.iloc[-2]
-
-    current_cloud = '🟢 Green Cloud' if current['ichimoku_bullish'] else '🔴 Red Cloud' if current['ichimoku_bearish'] else '⚪ Neutral'
-    previous_cloud = '🟢 Green Cloud' if previous['ichimoku_bullish'] else '🔴 Red Cloud' if previous['ichimoku_bearish'] else '⚪ Neutral'
-
-    if current_cloud != previous_cloud:
-        return f"☁️ Ichimoku Cloud switched from {previous_cloud} to {current_cloud}"
-    else:
-        return f"☁️ Ichimoku Cloud is still {current_cloud}"
-
-def alligator_water_status(df):
+def detect_breakout_trade(df):
     latest = df.iloc[-1]
-    if latest['alligator_bullish']:
-        return "🐊 Alligator is **above water** (bullish)."
-    elif latest['alligator_bearish']:
-        return "🐊 Alligator is **below water** (bearish)."
-    else:
-        return "🐊 Alligator is **neutral** (closed jaws or indecision)."
+    resistance = df['high'].rolling(20).max().iloc[-2]
+    if latest['close'] > resistance and latest['macd_hist_flip'] and latest['volume_spike']:
+        return {
+            "type": "Breakout Long",
+            "entry": latest['close'],
+            "stop": latest['close'] - latest['atr'],
+            "tp1": latest['close'] + latest['atr'] * 1.5,
+            "tp2": latest['close'] + latest['atr'] * 2.5,
+        }
+    return None
+
+def detect_pullback_trade(df):
+    latest = df.iloc[-1]
+    support = df['low'].rolling(20).min().iloc[-2]
+    if support < latest['close'] < support + latest['atr'] and latest['rsi'] < 40:
+        return {
+            "type": "Pullback Long",
+            "entry": latest['close'],
+            "stop": latest['close'] - latest['atr'],
+            "tp1": latest['close'] + latest['atr'] * 1.5,
+            "tp2": latest['close'] + latest['atr'] * 2.5,
+        }
+    return None
+
+def detect_short_trade(df):
+    latest = df.iloc[-1]
+    support = df['low'].rolling(20).min().iloc[-2]
+    if latest['close'] < support and not latest['macd_hist_flip'] and latest['volume_spike']:
+        return {
+            "type": "Breakdown Short",
+            "entry": latest['close'],
+            "stop": latest['close'] + latest['atr'],
+            "tp1": latest['close'] - latest['atr'] * 1.5,
+            "tp2": latest['close'] - latest['atr'] * 2.5,
+        }
+    return None
+
+def trade_confidence_score(df, trade):
+    score = 0
+    latest = df.iloc[-1]
+    if latest['supertrend_bull'] and 'Long' in trade['type']: score += 1
+    if latest['supertrend_bear'] and 'Short' in trade['type']: score += 1
+    if latest['alligator_bullish'] and 'Long' in trade['type']: score += 1
+    if latest['alligator_bearish'] and 'Short' in trade['type']: score += 1
+    if latest['ichimoku_bullish'] and 'Long' in trade['type']: score += 1
+    if latest['ichimoku_bearish'] and 'Short' in trade['type']: score += 1
+    return score
+
+def format_trade_alert(trade):
+    rr = abs((trade['tp1'] - trade['entry']) / (trade['entry'] - trade['stop']))
+    return f"""
+🚨 **{trade['type']} Trade Alert – ETH/USDT**
+
+💥 Entry: ${trade['entry']:,.2f}
+🛑 Stop Loss: ${trade['stop']:,.2f}
+🎯 Take Profit 1: ${trade['tp1']:,.2f}
+🎯 Take Profit 2: ${trade['tp2']:,.2f}
+
+⚖️ Risk/Reward: {rr:.2f}x
+📊 Confidence Score: {trade.get('confidence', 0)}/6
+"""
 
 def get_eth_data(interval='5', limit=200):
     try:
-        url = f"https://api.kraken.com/0/public/OHLC?pair=ETHUSD&interval={interval}"
+        symbol_map = {'ETHUSDT': 'XETHZUSD'}
+        pair = symbol_map.get('ETHUSDT', 'XETHZUSD')
+        url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval}"
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json().get("result", {})
@@ -165,135 +212,22 @@ def apply_indicators(df):
     df['ichimoku_twist'] = (senkou_span_a - senkou_span_b).abs().diff().rolling(2).mean() < 1e-3
     return df
 
-def detect_breakout_trade(df):
-    latest = df.iloc[-1]
-    if (
-        latest['close'] > latest['ema50']
-        and latest['macd'] > latest['signal']
-        and latest['rsi'] > 50
-        and latest['supertrend_bull']
-    ):
-        return {
-            'type': 'Breakout Long',
-            'entry': latest['close'],
-            'stop': latest['low'] - latest['atr'],
-            'tp1': latest['close'] + latest['atr'] * 2,
-            'tp2': latest['close'] + latest['atr'] * 4
-        }
-    return None
-
-def detect_pullback_trade(df):
-    latest = df.iloc[-1]
-    if (
-        latest['ema_cross_up']
-        and latest['rsi_oversold']
-        and latest['macd'] > latest['signal']
-        and latest['stochrsi_cross_up']
-    ):
-        return {
-            'type': 'Pullback Long',
-            'entry': latest['close'],
-            'stop': latest['low'] - latest['atr'],
-            'tp1': latest['close'] + latest['atr'] * 1.5,
-            'tp2': latest['close'] + latest['atr'] * 3
-        }
-    return None
-
-def detect_short_trade(df):
-    latest = df.iloc[-1]
-    if (
-        latest['close'] < latest['ema50']
-        and latest['macd'] < latest['signal']
-        and latest['rsi'] < 50
-        and latest['supertrend_bear']
-    ):
-        return {
-            'type': 'Breakdown Short',
-            'entry': latest['close'],
-            'stop': latest['high'] + latest['atr'],
-            'tp1': latest['close'] - latest['atr'] * 2,
-            'tp2': latest['close'] - latest['atr'] * 4
-        }
-    return None
-
-def detect_camarilla_trade(df):
-    latest = df.iloc[-1]
-    h3 = latest['high'] * 1.015
-    l3 = latest['low'] * 0.985
-    if latest['close'] > h3:
-        return {
-            'type': 'Camarilla Breakout Long',
-            'entry': latest['close'],
-            'stop': h3 - latest['atr'],
-            'tp1': latest['close'] + latest['atr'] * 2,
-            'tp2': latest['close'] + latest['atr'] * 3
-        }
-    elif latest['close'] < l3:
-        return {
-            'type': 'Camarilla Breakdown Short',
-            'entry': latest['close'],
-            'stop': l3 + latest['atr'],
-            'tp1': latest['close'] - latest['atr'] * 2,
-            'tp2': latest['close'] - latest['atr'] * 3
-        }
-    return None
-
-def trade_confidence_score(df, trade):
-    latest = df.iloc[-1]
-    score = 0
-
-    # EMA trend confirmation
-    if (trade['type'].endswith('Long') and latest['ema_cross_up']) or (trade['type'].endswith('Short') and latest['ema_cross_down']):
-        score += 1
-
-    # MACD direction
-    if (trade['type'].endswith('Long') and latest['macd'] > latest['signal']) or (trade['type'].endswith('Short') and latest['macd'] < latest['signal']):
-        score += 1
-
-    # RSI alignment
-    if (trade['type'].endswith('Long') and latest['rsi'] > 50) or (trade['type'].endswith('Short') and latest['rsi'] < 50):
-        score += 1
-
-    # Supertrend support
-    if (trade['type'].endswith('Long') and latest['supertrend_bull']) or (trade['type'].endswith('Short') and latest['supertrend_bear']):
-        score += 1
-
-    # Volume confirmation
-    if latest['volume_spike']:
-        score += 1
-
-    stars = '⭐' * score + '✩' * (5 - score)
-    percentage = f"{int(score / 5 * 100)}%"
-    return f"{percentage} {stars}"
-
-def format_trade_alert(trade):
-    confidence_str = trade.get('confidence', 'N/A')
-    percent = confidence_str.split()[0].replace('%','')
-    if percent.isdigit() and int(percent) < 60:
-        return None  # Do not trigger alert below 60% confidence
-
-    direction_emoji = "🟢" if trade['type'].endswith("Long") else "🔴"
-    msg = f"""
-🚨 **{direction_emoji} {trade['type']} Trade Alert**
-
-💰 Entry: ${trade['entry']:.2f}
-📉 Stop Loss: ${trade['stop']:.2f}
-🎯 Take Profit 1: ${trade['tp1']:.2f}
-🎯 Take Profit 2: ${trade['tp2']:.2f}
-
-📊 Confidence Score: {confidence_str}
-    """
-    return msg
-
 def format_alerts(df):
     latest = df.iloc[-1]
-    previous = df.iloc[-2]
-    direction = "⬆️" if latest['close'] > previous['close'] else "⬇️" if latest['close'] < previous['close'] else "➖"
-    change_pct = ((latest['close'] - previous['close']) / previous['close']) * 100
+    prev_close = df['close'].iloc[-2]
+    price_change = latest['close'] - prev_close
+    price_pct = (price_change / prev_close) * 100
     timestamp = latest['time'].astimezone(CENTRAL_TZ).strftime('%Y-%m-%d %I:%M %p')
 
+    if price_change > 0:
+        direction_emoji = '⬆️'
+    elif price_change < 0:
+        direction_emoji = '⬇️'
+    else:
+        direction_emoji = '➖'
+
     msg = f"""
-📊 ETH Strategy Status {direction} ({change_pct:+.2f}%) at {timestamp}
+📊 **ETH Strategy Status** {direction_emoji} ({price_pct:+.2f}%) at {timestamp}
 
 💰 Price: ${latest['close']:,.2f}
 📈 RSI: {latest['rsi']:.2f}
