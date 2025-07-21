@@ -246,6 +246,40 @@ Market Bias: {'🟢 Bullish' if latest['ema_cross_up'] else '🔴 Bearish'}
     return msg
 
 @bot.command()
+async def cloud(ctx):
+    df = get_eth_data()
+    if df is not None:
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+
+        current_cloud = '🟢 Green Cloud' if current['ichimoku_bullish'] else '🔴 Red Cloud' if current['ichimoku_bearish'] else '⚪ Neutral'
+        previous_cloud = '🟢 Green Cloud' if previous['ichimoku_bullish'] else '🔴 Red Cloud' if previous['ichimoku_bearish'] else '⚪ Neutral'
+
+        if current_cloud != previous_cloud:
+            msg = f"☁️ Ichimoku Cloud switched from {previous_cloud} to {current_cloud}"
+        else:
+            msg = f"☁️ Ichimoku Cloud is still {current_cloud}"
+
+        await ctx.send(msg)
+    else:
+        await ctx.send("⚠️ Could not fetch ETH data.")
+
+@bot.command()
+async def alligator(ctx):
+    df = get_eth_data()
+    if df is not None:
+        latest = df.iloc[-1]
+        if latest['alligator_bullish']:
+            msg = "🐊 Alligator is **above water** (bullish)."
+        elif latest['alligator_bearish']:
+            msg = "🐊 Alligator is **below water** (bearish)."
+        else:
+            msg = "🐊 Alligator is **neutral** (closed jaws or indecision)."
+        await ctx.send(msg)
+    else:
+        await ctx.send("⚠️ Could not fetch ETH data.")
+
+@bot.command()
 async def ethmoves(ctx):
     df = get_eth_data(interval='240', limit=42)  # 4hr candles
     if df is None:
@@ -278,6 +312,34 @@ async def ethmoves(ctx):
 🔽 Down Moves: {down_moves} ({down_pct:.1f}%)
 📊 Total Moves: {total_moves}
 """)
+
+@bot.command()
+async def camarilla(ctx):
+    df = get_eth_data()
+    if df is not None:
+        latest = df.iloc[-1]
+        h3 = latest['high'] * 1.015
+        l3 = latest['low'] * 0.985
+        price = latest['close']
+
+        if price > h3:
+            status = "📈 Price is above H3 (Breakout zone)"
+        elif price < l3:
+            status = "📉 Price is below L3 (Breakdown zone)"
+        else:
+            status = "⏳ Price is between H3 and L3 (Range bound)"
+
+        await ctx.send(f"""
+📏 **Camarilla Levels**
+
+H3: ${h3:.2f}
+L3: ${l3:.2f}
+Price: ${price:.2f}
+
+{status}
+""")
+    else:
+        await ctx.send("⚠️ Could not fetch ETH data.")
 
 if __name__ == "__main__":
     bot.run(os.getenv("DISCORD_BOT_TOKEN"))
