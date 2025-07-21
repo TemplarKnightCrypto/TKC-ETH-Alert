@@ -19,8 +19,8 @@ load_dotenv()
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+last_trade_hash = None
 alert_channel_id = None
-ALERT_SENSITIVITY = 3
 CENTRAL_TZ = pytz.timezone("US/Central")
 
 app = Flask(__name__)
@@ -37,23 +37,43 @@ threading.Thread(target=run_flask).start()
 @bot.event
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
-    daily_eth_report.start()
+    eth_scan_30min.start()
 
-@tasks.loop(minutes=60)
-async def daily_eth_report():
-    now = datetime.datetime.now(CENTRAL_TZ)
-    if now.hour == 7:
+@tasks.loop(minutes=30)
+async def eth_scan_30min():
+    global last_trade_hash
+    df = get_eth_data()
+    if df is not None:
+        trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
         channel = bot.get_channel(alert_channel_id)
-        df = get_eth_data()
-        if df is not None:
-            await channel.send(format_alerts(df))
-            await channel.send(generate_summary(df, "Daily"))
+                if trade:
+            trade_hash = hash(frozenset(trade.items()))
+            if trade_hash != last_trade_hash:
+                last_trade_hash = trade_hash
+                trade['confidence'] = trade_confidence_score(df, trade)
+                await channel.send(format_trade_alert(trade))
+            else:
+                print("Duplicate trade detected, skipping alert.")
+            await channel.send(format_trade_alert(trade))
+        await channel.send(format_alerts(df))
 
 @bot.command()
 async def setchannel(ctx):
     global alert_channel_id
     alert_channel_id = ctx.channel.id
     await ctx.send("✅ Alerts will be sent to this channel.")
+
+@bot.command()
+async def trade(ctx):
+    df = get_eth_data()
+    if df is not None:
+        trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
+        if trade:
+            await ctx.send(format_trade_alert(trade))
+        else:
+            await ctx.send("🕵️‍♂️ No active trade setup at this moment.")
+    else:
+        await ctx.send("⚠️ Could not fetch ETH data.")
 
 @bot.command()
 async def price(ctx):
@@ -63,90 +83,69 @@ async def price(ctx):
     else:
         await ctx.send("⚠️ Could not fetch ETH data.")
 
-@bot.command()
-async def status(ctx):
-    df = get_eth_data()
-    if df is not None:
-        await ctx.send(format_alerts(df))
-    else:
-        await ctx.send("⚠️ Could not fetch ETH data.")
+def detect_breakout_trade(df):
+    latest = df.iloc[-1]
+    resistance = df['high'].rolling(20).max().iloc[-2]
+    if latest['close'] > resistance and latest['macd_hist_flip'] and latest['volume_spike']:
+        return {
+            "type": "Breakout Long",
+            "entry": latest['close'],
+            "stop": latest['close'] - latest['atr'],
+            "tp1": latest['close'] + latest['atr'] * 1.5,
+            "tp2": latest['close'] + latest['atr'] * 2.5,
+        }
+    return None
 
-@bot.command()
-async def summary(ctx, timeframe="daily"):
-    df = get_eth_data()
-    if df is not None:
-        await ctx.send(generate_summary(df, timeframe.capitalize()))
-    else:
-        await ctx.send("⚠️ Could not fetch ETH data.")
+def detect_pullback_trade(df):
+    latest = df.iloc[-1]
+    support = df['low'].rolling(20).min().iloc[-2]
+    if support < latest['close'] < support + latest['atr'] and latest['rsi'] < 40:
+        return {
+            "type": "Pullback Long",
+            "entry": latest['close'],
+            "stop": latest['close'] - latest['atr'],
+            "tp1": latest['close'] + latest['atr'] * 1.5,
+            "tp2": latest['close'] + latest['atr'] * 2.5,
+        }
+    return None
 
-@bot.command()
-async def commands(ctx):
-    await ctx.send("""
-📘 **Available Commands**:
-!setchannel — Set this channel for alerts
-!price — Current ETH strategy snapshot
-!status — Full strategy indicator report
-!summary [daily|weekly] — Summary report
-!ethmoves — 1% move tracker
-!sensitivity [1–5] — Adjust alert sensitivity
-    """)
+def detect_short_trade(df):
+    latest = df.iloc[-1]
+    support = df['low'].rolling(20).min().iloc[-2]
+    if latest['close'] < support and not latest['macd_hist_flip'] and latest['volume_spike']:
+        return {
+            "type": "Breakdown Short",
+            "entry": latest['close'],
+            "stop": latest['close'] + latest['atr'],
+            "tp1": latest['close'] - latest['atr'] * 1.5,
+            "tp2": latest['close'] - latest['atr'] * 2.5,
+        }
+    return None
 
-@bot.command()
-async def sensitivity(ctx, level: int):
-    global ALERT_SENSITIVITY
-    if 1 <= level <= 5:
-        ALERT_SENSITIVITY = level
-        await ctx.send(f"🔧 Sensitivity set to level {level}.")
-    else:
-        await ctx.send("⚠️ Please choose a level between 1 (high sensitivity) and 5 (low sensitivity).")
+def trade_confidence_score(df, trade):
+    score = 0
+    latest = df.iloc[-1]
+    if latest['supertrend_bull'] and 'Long' in trade['type']: score += 1
+    if latest['supertrend_bear'] and 'Short' in trade['type']: score += 1
+    if latest['alligator_bullish'] and 'Long' in trade['type']: score += 1
+    if latest['alligator_bearish'] and 'Short' in trade['type']: score += 1
+    if latest['ichimoku_bullish'] and 'Long' in trade['type']: score += 1
+    if latest['ichimoku_bearish'] and 'Short' in trade['type']: score += 1
+    return score
 
-@bot.command()
-async def ethmoves(ctx):
-    df = get_eth_data(interval='240', limit=42)  # 4hr interval
-    if df is None:
-        await ctx.send("⚠️ Could not fetch ETH data.")
-        return
+def format_trade_alert(trade):
+    rr = abs((trade['tp1'] - trade['entry']) / (trade['entry'] - trade['stop']))
+    return f"""
+🚨 **{trade['type']} Trade Alert – ETH/USDT**
 
-    moves = []
-    for i in range(len(df)):
-        entry_price = df.iloc[i]['close']
-        entry_time = df.iloc[i]['time'].astimezone(CENTRAL_TZ)
-        target_up = entry_price * 1.01
-        target_down = entry_price * 0.99
-        for j in range(i+1, len(df)):
-            high = df.iloc[j]['high']
-            low = df.iloc[j]['low']
-            exit_time = df.iloc[j]['time'].astimezone(CENTRAL_TZ)
-            if high >= target_up:
-                moves.append((entry_time, entry_price, exit_time, high, "Up"))
-                break
-            elif low <= target_down:
-                moves.append((entry_time, entry_price, exit_time, low, "Down"))
-                break
+💥 Entry: ${trade['entry']:,.2f}
+🛑 Stop Loss: ${trade['stop']:,.2f}
+🎯 Take Profit 1: ${trade['tp1']:,.2f}
+🎯 Take Profit 2: ${trade['tp2']:,.2f}
 
-    if not moves:
-        await ctx.send("📉 No 1% ETH moves detected in the last 24 hours.")
-        return
-
-    header = "**📊 ETH 1% Move Summary (4hr candles)**\n"
-    message = header
-    for m in moves:
-        entry_time, entry_price, exit_time, exit_price, direction = m
-        section = (
-            f"\n🔹 Direction: {direction}\n"
-            f"• Entry: ${entry_price:.2f} at {entry_time.strftime('%b %d %I:%M %p')}\n"
-            f"• Exit: ${exit_price:.2f} at {exit_time.strftime('%b %d %I:%M %p')}\n"
-            f"• Δ: {exit_price - entry_price:+.2f} ({(exit_price - entry_price) / entry_price * 100:.2f}%)\n"
-        )
-        if len(message) + len(section) > 1900:
-            await ctx.send(message)
-            message = section
-        else:
-            message += section
-
-    if message.strip() and message != header:
-        await ctx.send(message)
-
+⚖️ Risk/Reward: {rr:.2f}x
+📊 Confidence Score: {trade.get('confidence', 0)}/6
+"""
 
 def get_eth_data(interval='5', limit=200):
     try:
@@ -213,8 +212,20 @@ def apply_indicators(df):
 
 def format_alerts(df):
     latest = df.iloc[-1]
+    prev_close = df['close'].iloc[-2]
+    price_change = latest['close'] - prev_close
+    price_pct = (price_change / prev_close) * 100
+    timestamp = latest['time'].astimezone(CENTRAL_TZ).strftime('%Y-%m-%d %I:%M %p')
+
+    if price_change > 0:
+        direction_emoji = '⬆️'
+    elif price_change < 0:
+        direction_emoji = '⬇️'
+    else:
+        direction_emoji = '➖'
+
     msg = f"""
-📊 **ETH Strategy Status**
+📊 **ETH Strategy Status** {direction_emoji} ({price_pct:+.2f}%) at {timestamp}
 
 💰 Price: ${latest['close']:,.2f}
 📈 RSI: {latest['rsi']:.2f}
@@ -230,15 +241,6 @@ def format_alerts(df):
 
 Market Bias: {'🟢 Bullish' if latest['ema_cross_up'] else '🔴 Bearish'}
 """
-    return msg
-
-def generate_summary(df, timeframe='Daily'):
-    latest = df.iloc[-1]
-    highest = df['high'].max()
-    lowest = df['low'].min()
-    msg = f"\n**{timeframe} ETH Summary**\nClose: ${latest['close']:.2f}\nHigh: ${highest:.2f}\nLow: ${lowest:.2f}\n"
-    msg += f"Support: ${lowest:.2f}\nResistance: ${highest:.2f}\n"
-    msg += f"RSI: {latest['rsi']:.2f}, MACD: {latest['macd']:.2f}\n"
     return msg
 
 if __name__ == "__main__":
