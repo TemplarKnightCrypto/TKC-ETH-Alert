@@ -46,15 +46,18 @@ async def eth_scan_30min():
     if df is not None:
         trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
         channel = bot.get_channel(alert_channel_id)
-        if trade:
-            trade_hash = hash(frozenset(trade.items()))
-            if trade_hash != last_trade_hash:
-                last_trade_hash = trade_hash
-                trade['confidence'] = trade_confidence_score(df, trade)
-                await channel.send(format_trade_alert(trade))
-            else:
-                print("Duplicate trade detected, skipping alert.")
-        await channel.send(format_alerts(df))
+        if channel:
+            if trade:
+                trade_hash = hash(frozenset(trade.items()))
+                if trade_hash != last_trade_hash:
+                    last_trade_hash = trade_hash
+                    trade['confidence'] = trade_confidence_score(df, trade)
+                    await channel.send(format_trade_alert(trade))
+                else:
+                    print("Duplicate trade detected, skipping alert.")
+            await channel.send(format_alerts(df))
+        else:
+            print("⚠️ Alert channel is not set. Run !setchannel in Discord.")
 
 @bot.command()
 async def setchannel(ctx):
