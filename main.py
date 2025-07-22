@@ -124,14 +124,17 @@ def backtest(df):
     wins = [p for p in trades if p > 0]
     return {'total': len(trades), 'win_rate': len(wins)/len(trades)*100 if trades else 0}
 
-# --- Bot Setup with discord.Bot ---
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix='!', intents=intents)
 # --- Bot Setup with commands.Bot & Slash Sync ---
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.event
+async def on_ready():
+    await bot.tree.sync()
+    logging.info(f"Logged in as {bot.user}")
+    scan_loop.start()
+
+
 async def on_ready():
     await bot.tree.sync()
     logging.info(f"Logged in as {bot.user}")
