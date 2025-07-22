@@ -82,298 +82,236 @@ async def eth_scan_30min():
     else:
         print("⚠️ Status channel not set. Use !setstatuschannel.")
 
-# Command: set trade alert channel
-default_doc = "Call this in the channel where you want trade alerts."
-@bot.command()
-async def setchannel(ctx):
-    global alert_channel_id
-    alert_channel_id = ctx.channel.id
-    await ctx.send("✅ Trade alerts will be sent here.")
+```python
+import os
+import json
+import logging
+import requests
+import pandas as pd
+import pytz
+from discord.ext import tasks, commands
+import discord
+from ta.trend import ema_indicator
+from ta.momentum import rsi, stochrsi, tsi
+from ta.volatility import average_true_range
+from ta.volume import on_balance_volume
 
-# Command: set status report channel
-@bot.command()
-async def setstatuschannel(ctx):
-    global status_channel_id
-    status_channel_id = ctx.channel.id
-    await ctx.send("✅ 30‑minute status reports will be sent here.")
+# --- Configuration & Logging ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+CHANNEL_FILE = 'channels.json'
+CENTRAL_TZ = pytz.timezone('US/Central')
 
-# On-demand trade command\@bot.command()
-async def trade(ctx):
-    df = get_eth_data()
-    if df is not None:
-        trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
-        if trade:
-            await ctx.send(format_trade_alert(trade))
-        else:
-            await ctx.send("🕵️‍♂️ No active trade setup at this moment.")
-    else:
-        await ctx.send("⚠️ Could not fetch ETH data.")
+# --- Channel Persistence ---
+def load_channels():
+    if os.path.isfile(CHANNEL_FILE):
+        with open(CHANNEL_FILE, 'r') as f:
+            return json.load(f)
+    return {'alert': None, 'status': None}
 
-# On-demand price/status command\@bot.command()
-async def price(ctx):
-    df = get_eth_data()
-    if df is not None:
-        await ctx.send(format_alerts(df))
-    else:
-        await ctx.send("⚠️ Could not fetch ETH data.")
+def save_channels(channels):
+    with open(CHANNEL_FILE, 'w') as f:
+        json.dump(channels, f)
 
-# Trade detection functions
-def detect_breakout_trade(df):
-    latest = df.iloc[-1]
-    resistance = df['high'].rolling(20).max().iloc[-2]
-    if latest['close'] > resistance and latest['macd_hist_flip'] and latest['volume_spike']:
-        return {
-            "type": "Breakout Long",
-            "entry": latest['close'],
-            "stop": latest['close'] - latest['atr'],
-            "tp1": latest['close'] + latest['atr'] * 1.5,
-            "tp2": latest['close'] + latest['atr'] * 2.5,
-        }
-    return None
+channels = load_channels()
 
-def detect_pullback_trade(df):
-    latest = df.iloc[-1]
-    support = df['low'].rolling(20).min().iloc[-2]
-    if support < latest['close'] < support + latest['atr'] and latest['rsi'] < 40:
-        return {
-            "type": "Pullback Long",
-            "entry": latest['close'],
-            "stop": latest['close'] - latest['atr'],
-            "tp1": latest['close'] + latest['atr'] * 1.5,
-            "tp2": latest['close'] + latest['atr'] * 2.5,
-        }
-    return None
+# --- Data Fetching & Indicators ---
+def fetch_ohlc(interval: str = '5', limit: int = 200) -> pd.DataFrame:
+    url = f"https://api.kraken.com/0/public/OHLC?pair=XETHZUSD&interval={interval}&since=0"
+    resp = requests.get(url)
+    resp.raise_for_status()
+    data = resp.json()['result']
+    key = next(k for k in data if k != 'last')
+    df = pd.DataFrame(data[key], columns=["time","open","high","low","close","vwap","volume","count"])
+    df['time'] = pd.to_datetime(df['time'].astype(float), unit='s', utc=True)
+    df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
+    return df.set_index('time')
 
-def detect_short_trade(df):
-    latest = df.iloc[-1]
-    support = df['low'].rolling(20).min().iloc[-2]
-    if latest['close'] < support and not latest['macd_hist_flip'] and latest['volume_spike']:
-        return {
-            "type": "Breakdown Short",
-            "entry": latest['close'],
-            "stop": latest['close'] + latest['atr'],
-            "tp1": latest['close'] - latest['atr'] * 1.5,
-            "tp2": latest['close'] - latest['atr'] * 2.5,
-        }
-    return None
 
-def trade_confidence_score(df, trade):
-    score = 0
-    latest = df.iloc[-1]
-    if latest['supertrend_bull'] and 'Long' in trade['type']: score += 1
-    if latest['supertrend_bear'] and 'Short' in trade['type']: score += 1
-    if latest['alligator_bullish'] and 'Long' in trade['type']: score += 1
-    if latest['alligator_bearish'] and 'Short' in trade['type']: score += 1
-    if latest['ichimoku_bullish'] and 'Long' in trade['type']: score += 1
-    if latest['ichimoku_bearish'] and 'Short' in trade['type']: score += 1
-    return score
-
-def format_trade_alert(trade):
-    rr = abs((trade['tp1'] - trade['entry']) / (trade['entry'] - trade['stop']))
-    return f"""
-🚨 **{trade['type']} Trade Alert – ETH/USDT**
-
-💥 Entry: ${trade['entry']:,.2f}
-🛑 Stop Loss: ${trade['stop']:,.2f}
-🎯 Take Profit 1: ${trade['tp1']:,.2f}
-🎯 Take Profit 2: ${trade['tp2']:,.2f}
-
-⚖️ Risk/Reward: {rr:.2f}x
-📊 Confidence Score: {trade.get('confidence', 0)}/6
-"""
-
-def get_eth_data(interval='5', limit=200):
-    try:
-        symbol_map = {'ETHUSDT': 'XETHZUSD'}
-        pair = symbol_map.get('ETHUSDT', 'XETHZUSD')
-        url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json().get("result", {})
-            key = next(k for k in data if k != 'last')
-            candles = data[key]
-            df = pd.DataFrame(candles, columns=["time", "open", "high", "low", "close", "vwap", "volume", "count"])
-            df['time'] = pd.to_datetime(df['time'].astype(float), unit='s', utc=True)
-            df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
-            df = df[['time','open','high','low','close','volume']]
-            return apply_indicators(df)
-    except Exception as e:
-        print("Error fetching data:", e)
-        return None
-
-def apply_indicators(df):
+def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    # Core indicators
     df['ema50'] = ema_indicator(df['close'], window=50)
     df['rsi'] = rsi(df['close'], window=14)
-    df['stochrsi'] = stochrsi(df['close'], window=14)
-    df['tsi'] = tsi(df['close'])
-    df['obv'] = on_balance_volume(df['close'], df['volume'])
     df['atr'] = average_true_range(df['high'], df['low'], df['close'], window=14)
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
     exp2 = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = exp1 - exp2
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['signal']
-    df['macd_hist_flip'] = df['macd_hist'].diff().apply(lambda x: x > 0)
-    df['rsi_overbought'] = df['rsi'] > 70
-    df['rsi_oversold'] = df['rsi'] < 30
-    df['ema_cross_up'] = df['close'] > df['ema50']
-    df['ema_cross_down'] = df['close'] < df['ema50']
+    df['macd_hist_flip'] = (df['macd'] - df['signal']).diff() > 0
+    df['stochrsi'] = stochrsi(df['close'], window=14)
+    df['tsi'] = tsi(df['close'])
+    df['obv'] = on_balance_volume(df['close'], df['volume'])
     df['volume_spike'] = df['volume'] > df['volume'].rolling(20).mean() * 1.5
-    df['stochrsi_cross_up'] = df['stochrsi'].diff() > 0.1
-    df['stochrsi_cross_down'] = df['stochrsi'].diff() < -0.1
-    df['tsi_bullish'] = df['tsi'] > 0
-    df['tsi_bearish'] = df['tsi'] < 0
     df['supertrend_bull'] = df['close'] > df['high'].rolling(10).mean()
     df['supertrend_bear'] = df['close'] < df['low'].rolling(10).mean()
+    # Alligator
     df['jaw'] = df['close'].rolling(13).mean()
     df['teeth'] = df['close'].rolling(8).mean()
     df['lips'] = df['close'].rolling(5).mean()
-    df['alligator_bullish'] = (df['lips'] > df['teeth']) & (df['teeth'] > df['jaw'])
-    df['alligator_bearish'] = (df['lips'] < df['teeth']) & (df['teeth'] < df['jaw'])
-    period9_high = df['high'].rolling(window=9).max()
-    period9_low = df['low'].rolling(window=9).min()
-    tenkan_sen = (period9_high + period9_low) / 2
-    period26_high = df['high'].rolling(window=26).max()
-    period26_low = df['low'].rolling(window=26).min()
-    kijun_sen = (period26_high + period26_low) / 2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-    period52_high = df['high'].rolling(52).max()
-    period52_low = df['low'].rolling(52).min()
-    senkou_span_b = ((period52_high + period52_low) / 2).shift(26)
-    df['ichimoku_bullish'] = (df['close'] > senkou_span_a) & (df['close'] > senkou_span_b)
-    df['ichimoku_bearish'] = (df['close'] < senkou_span_a) & (df['close'] < senkou_span_b)
-    df['ichimoku_twist'] = (senkou_span_a - senkou_span_b).abs().diff().rolling(2).mean() < 1e-3
+    df['alligator_bull'] = (df['lips'] > df['teeth']) & (df['teeth'] > df['jaw'])
+    df['alligator_bear'] = (df['lips'] < df['teeth']) & (df['teeth'] < df['jaw'])
+    # Ichimoku spans
+    high9, low9 = df['high'].rolling(9).max(), df['low'].rolling(9).min()
+    high26, low26 = df['high'].rolling(26).max(), df['low'].rolling(26).min()
+    tenkan = (high9 + low9) / 2
+    kijun = (high26 + low26) / 2
+    df['span_a'] = ((tenkan + kijun) / 2).shift(26)
+    span52_high, span52_low = df['high'].rolling(52).max(), df['low'].rolling(52).min()
+    df['span_b'] = ((span52_high + span52_low) / 2).shift(26)
+    df['ichimoku_bull'] = (df['close'] > df['span_a']) & (df['close'] > df['span_b'])
+    df['ichimoku_bear'] = (df['close'] < df['span_a']) & (df['close'] < df['span_b'])
+    df['ichimoku_twist'] = ((df['span_a'] - df['span_b']).abs().diff().rolling(2).mean()) < 1e-3
+    latest = df.iloc[-1]
+    df['market_bias'] = '🟢 Bullish' if latest['close'] > latest['span_a'] and latest['close'] > latest['span_b'] else '🔴 Bearish'
     return df
 
-def format_alerts(df):
-    latest = df.iloc[-1]
-    prev_close = df['close'].iloc[-2]
-    price_change = latest['close'] - prev_close
-    price_pct = (price_change / prev_close) * 100
-    timestamp = latest['time'].astimezone(CENTRAL_TZ).strftime('%Y-%m-%d %I:%M %p')
-
-    if price_change > 0:
-        direction_emoji = '⬆️'
-    elif price_change < 0:
-        direction_emoji = '⬇️'
-    else:
-        direction_emoji = '➖'
-
-    msg = f"""
-📊 **ETH Strategy Status** {direction_emoji} ({price_pct:+.2f}%) at {timestamp}
-
-💰 Price: ${latest['close']:,.2f}
-📈 RSI: {latest['rsi']:.2f}
-📉 MACD: {latest['macd']:.4f} | Signal: {latest['signal']:.4f}
-📊 Stoch RSI: {latest['stochrsi']:.2f}
-📊 EMA50: ${latest['ema50']:,.2f}
-📶 OBV: {'📈 Bullish' if latest['tsi_bullish'] else '📉 Bearish'}
-
-🧠 Supertrend: {'🟢 Bullish' if latest['supertrend_bull'] else '🔴 Bearish' if latest['supertrend_bear'] else '⚪ Neutral'}
-🐊 Alligator: {'🟢 Bullish' if latest['alligator_bullish'] else '🔴 Bearish' if latest['alligator_bearish'] else '⚪ Neutral'}
-☁️ Ichimoku: {'🟢 Bullish' if latest['ichimoku_bullish'] else '🔴 Bearish' if latest['ichimoku_bearish'] else '⚪ Neutral'}
-🌪️ Twist Alert: {'⚠️ Twist detected' if latest['ichimoku_twist'] else '✅ Stable'}
-
-Market Bias: {'🟢 Bullish' if latest['ema_cross_up'] else '🔴 Bearish'}
-"""
-    return msg
-
-@bot.command()
-async def cloud(ctx):
-    df = get_eth_data()
-    if df is not None:
-        current = df.iloc[-1]
-        previous = df.iloc[-2]
-
-        current_cloud = '🟢 Green Cloud' if current['ichimoku_bullish'] else '🔴 Red Cloud' if current['ichimoku_bearish'] else '⚪ Neutral'
-        previous_cloud = '🟢 Green Cloud' if previous['ichimoku_bullish'] else '🔴 Red Cloud' if previous['ichimoku_bearish'] else '⚪ Neutral'
-
-        if current_cloud != previous_cloud:
-            msg = f"☁️ Ichimoku Cloud switched from {previous_cloud} to {current_cloud}"
+# --- Signal Detection ---
+class SignalDetector:
+    def __init__(self, df): self.df = df
+    def breakout_long(self):
+        l = self.df.iloc[-1]; res = self.df['high'].rolling(20).max().iloc[-2]
+        if l['close'] > res and l['macd_hist_flip'] and l['volume_spike']:
+            return self._build('Breakout Long', l)
+    def pullback_long(self):
+        l = self.df.iloc[-1]; sup = self.df['low'].rolling(20).min().iloc[-2]
+        if sup < l['close'] < sup + l['atr'] and l['rsi'] < 40:
+            return self._build('Pullback Long', l)
+    def breakdown_short(self):
+        l = self.df.iloc[-1]; sup = self.df['low'].rolling(20).min().iloc[-2]
+        if l['close'] < sup and not l['macd_hist_flip'] and l['volume_spike']:
+            return self._build('Breakdown Short', l)
+    def detect(self): return self.breakout_long() or self.pullback_long() or self.breakdown_short()
+    def _build(self, ttype, l):
+        atr, price = l['atr'], l['close']
+        if 'Long' in ttype:
+            stop = price - atr; tp1, tp2 = price+atr*1.5, price+atr*2.5
         else:
-            msg = f"☁️ Ichimoku Cloud is still {current_cloud}"
+            stop = price + atr; tp1, tp2 = price-atr*1.5, price-atr*2.5
+        return {'type':ttype,'entry':price,'stop':stop,'tp1':tp1,'tp2':tp2,'rr':abs((tp1-price)/(price-stop))}
 
-        await ctx.send(msg)
-    else:
-        await ctx.send("⚠️ Could not fetch ETH data.")
+# --- Backtesting ---
+def backtest(df):
+    trades=[]
+    for i in range(20,len(df)-1):
+        sig = SignalDetector(df.iloc[:i+1]).detect()
+        if sig:
+            e = df['close'].iloc[i]; x = df['close'].iloc[i+1]
+            pnl = (x-e) if 'Long' in sig['type'] else (e-x)
+            trades.append(pnl)
+    wins = [p for p in trades if p>0]
+    return {'total':len(trades),'win_rate':len(wins)/len(trades)*100 if trades else 0}
 
-@bot.command()
+# --- Bot Setup ---
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+@bot.event
+async def on_ready():
+    logging.info(f"Logged in as {bot.user}")
+    scan_loop.start()
+
+# --- Scan Loop with Rich Embeds ---
+@tasks.loop(minutes=30)
+async def scan_loop():
+    df = apply_indicators(fetch_ohlc())
+    sig = SignalDetector(df).detect()
+    # Alert Embed
+    if sig and channels['alert']:
+        embed = discord.Embed(title=f"🚨 {sig['type']} – ETH/USDT",
+                              color=0x00ff00 if 'Long' in sig['type'] else 0xff0000)
+        for k in ['entry','stop','tp1','tp2','rr']:
+            name = k.capitalize() if k!='rr' else 'R/R'
+            embed.add_field(name=name, value=f"${sig[k]:.2f}" if k!='rr' else f"{sig[k]:.2f}x")
+        await bot.get_channel(channels['alert']).send(embed=embed)
+    # Status Embed
+    if channels['status']:
+        l = df.iloc[-1]; p = df.iloc[-2]
+        pct = (l['close'] - p['close']) / p['close'] * 100
+        ts = l.name.astimezone(CENTRAL_TZ).strftime('%Y-%m-%d %I:%M %p')
+        st = discord.Embed(title=f"📊 ETH Strategy Status at {ts}", color=0x0099ff)
+        st.add_field(name="Price", value=f"${l['close']:.2f} ({pct:+.2f}%)")
+        st.add_field(name="RSI", value=f"{l['rsi']:.2f}")
+        st.add_field(name="MACD", value=f"{l['macd']:.4f} | {l['signal']:.4f}")
+        st.add_field(name="Stoch RSI", value=f"{l['stochrsi']:.2f}")
+        st.add_field(name="EMA50", value=f"${l['ema50']:.2f}")
+        st.add_field(name="OBV", value=f"{int(l['obv']):,}")
+        st.add_field(name="Supertrend", value="🟢 Bullish" if l['supertrend_bull'] else "🔴 Bearish")
+        st.add_field(name="Alligator", value="🟢 Bullish" if l['alligator_bull'] else "🔴 Bearish" if l['alligator_bear'] else "⚪ Neutral")
+        st.add_field(name="Ichimoku", value="🟢 Bullish" if l['ichimoku_bull'] else "🔴 Bearish" if l['ichimoku_bear'] else "⚪ Neutral")
+        st.add_field(name="Twist Alert", value="⚠️ Detected" if l['ichimoku_twist'] else "✅ Stable")
+        st.add_field(name="Market Bias", value=df['market_bias'].iloc[-1])
+        await bot.get_channel(channels['status']).send(embed=st)
+
+# --- Slash Commands ---
+@bot.slash_command(description="Get an on-demand trade signal")
+async def trade(ctx):
+    df = apply_indicators(fetch_ohlc())
+    sig = SignalDetector(df).detect()
+    if not sig:
+        return await ctx.respond("🕵️ No active trade.")
+    embed = discord.Embed(title=f"💡 {sig['type']} – ETH/USDT", color=0x00ff00 if 'Long' in sig['type'] else 0xff0000)
+    for k in ['entry','stop','tp1','tp2','rr']:
+        embed.add_field(name=k.capitalize() if k!='rr' else 'R/R', value=f"${sig[k]:.2f}" if k!='rr' else f"{sig[k]:.2f}x")
+    await ctx.respond(embed=embed)
+
+@bot.slash_command(description="Run a quick backtest of your strategy")
+async def backtest_cmd(ctx, candles: int = 200):
+    df = apply_indicators(fetch_ohlc(limit=candles))
+    stats = backtest(df)
+    await ctx.respond(f"Backtest: {stats['total']} trades, win rate {stats['win_rate']:.1f}%")
+
+@bot.slash_command(description="Set alert channel")
+async def set_alert_channel(ctx):
+    channels['alert'] = ctx.channel.id; save_channels(channels)
+    await ctx.respond(f"✅ Alert channel set to {ctx.channel.mention}")
+
+@bot.slash_command(description="Set status channel")
+async def set_status_channel(ctx):
+    channels['status'] = ctx.channel.id; save_channels(channels)
+    await ctx.respond(f"✅ Status channel set to {ctx.channel.mention}")
+
+# --- New Slash Commands for Legacy Functions ---
+@bot.slash_command(description="Check Alligator indicator status")
 async def alligator(ctx):
-    df = get_eth_data()
-    if df is not None:
-        latest = df.iloc[-1]
-        if latest['alligator_bullish']:
-            msg = "🐊 Alligator is **above water** (bullish)."
-        elif latest['alligator_bearish']:
-            msg = "🐊 Alligator is **below water** (bearish)."
-        else:
-            msg = "🐊 Alligator is **neutral** (closed jaws or indecision)."
-        await ctx.send(msg)
-    else:
-        await ctx.send("⚠️ Could not fetch ETH data.")
+    df = apply_indicators(fetch_ohlc())
+    latest = df.iloc[-1]
+    status = ("🐊 Bullish" if latest['alligator_bull'] else "🐊 Bearish" if latest['alligator_bear'] else "🐊 Neutral")
+    await ctx.respond(f"Alligator: {status}")
 
-@bot.command()
-async def ethmoves(ctx):
-    df = get_eth_data(interval='240', limit=42)  # 4hr candles
-    if df is None:
-        await ctx.send("⚠️ Could not fetch ETH data.")
-        return
-
-    up_moves, down_moves = 0, 0
-    for i in range(len(df)):
-        entry_price = df.iloc[i]['close']
-        target_up = entry_price * 1.01
-        target_down = entry_price * 0.99
-        for j in range(i+1, len(df)):
-            high = df.iloc[j]['high']
-            low = df.iloc[j]['low']
-            if high >= target_up:
-                up_moves += 1
-                break
-            elif low <= target_down:
-                down_moves += 1
-                break
-
-    total_moves = up_moves + down_moves
-    up_pct = (up_moves / total_moves * 100) if total_moves else 0
-    down_pct = (down_moves / total_moves * 100) if total_moves else 0
-
-    await ctx.send(f"""
-📈 **1% ETH Move Summary (4hr candles)**
-
-🔼 Up Moves: {up_moves} ({up_pct:.1f}%)
-🔽 Down Moves: {down_moves} ({down_pct:.1f}%)
-📊 Total Moves: {total_moves}
-""")
-
-@bot.command()
+@bot.slash_command(description="Get Camarilla levels and status")
 async def camarilla(ctx):
-    df = get_eth_data()
-    if df is not None:
-        latest = df.iloc[-1]
-        h3 = latest['high'] * 1.015
-        l3 = latest['low'] * 0.985
-        price = latest['close']
-
-        if price > h3:
-            status = "📈 Price is above H3 (Breakout zone)"
-        elif price < l3:
-            status = "📉 Price is below L3 (Breakdown zone)"
-        else:
-            status = "⏳ Price is between H3 and L3 (Range bound)"
-
-        await ctx.send(f"""
-📏 **Camarilla Levels**
-
-H3: ${h3:.2f}
-L3: ${l3:.2f}
-Price: ${price:.2f}
-
-{status}
-""")
+    df = fetch_ohlc()
+    latest = df.iloc[-1]
+    h3, l3, price = latest['high']*1.015, latest['low']*0.985, latest['close']
+    if price > h3:
+        status = "Breakout (Above H3)"
+    elif price < l3:
+        status = "Breakdown (Below L3)"
     else:
-        await ctx.send("⚠️ Could not fetch ETH data.")
+        status = "Range bound (Between H3/L3)"
+    await ctx.respond(f"H3: ${h3:.2f}, L3: ${l3:.2f}, Price: ${price:.2f} → {status}")
 
-if __name__ == "__main__":
-    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+@bot.slash_command(description="Check Ichimoku Cloud state")
+async def cloud(ctx):
+    df = apply_indicators(fetch_ohlc())
+    cur, prev = df.iloc[-1], df.iloc[-2]
+    cur_cloud = ("Green" if cur['ichimoku_bull'] else "Red" if cur['ichimoku_bear'] else "Neutral")
+    prev_cloud = ("Green" if prev['ichimoku_bull'] else "Red" if prev['ichimoku_bear'] else "Neutral")
+    msg = f"Ichimoku Cloud: {prev_cloud} → {cur_cloud}" if cur_cloud != prev_cloud else f"Ichimoku Cloud remains {cur_cloud}"
+    await ctx.respond(msg)
 
+@bot.slash_command(description="Summarize 1% moves over 4hr candles")
+async def ethmoves(ctx):
+    df = fetch_ohlc(interval='240', limit=42)
+    up=down=0
+    for i in range(len(df)-1):
+        e = df['close'].iloc[i]; tu, td = e*1.01, e*0.99
+        for j in range(i+1, len(df)):
+            if df['high'].iloc[j] >= tu: up+=1; break
+            if df['low'].iloc[j] <= td: down+=1; break
+    total = up+down
+    await ctx.respond(f"Up: {up} ({up/total*100:.1f}%), Down: {down} ({down/total*100:.1f}%), Total: {total}")
+
+if __name__ == '__main__':
+    bot.run(TOKEN)
+```
