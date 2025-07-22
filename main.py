@@ -265,4 +265,4 @@ async def ethmoves(ctx):
     await ctx.respond(embed=embed)
 
 if __name__ == '__main__':
-    bot.run(TOKEN)```
+    bot.run(TOKEN)
