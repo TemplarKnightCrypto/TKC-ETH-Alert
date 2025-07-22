@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 import pytz
 from datetime import datetime
-from discord.ext import tasks, commands
+from discord.ext import tasks
 import discord
 from ta.trend import ema_indicator
 from ta.momentum import rsi, stochrsi, tsi
@@ -36,12 +36,12 @@ def fetch_ohlc(interval: str = '5', limit: int = 200) -> pd.DataFrame:
     url = f"https://api.kraken.com/0/public/OHLC?pair=XETHZUSD&interval={interval}&since=0"
     resp = requests.get(url)
     resp.raise_for_status()
-    data = resp.json()['result']
+    data = resp.json().get('result', {})
     key = next(k for k in data if k != 'last')
-    df = pd.DataFrame(data[key], columns=["time","open","high","low","close","vwap","volume","count"])
-    df['time'] = pd.to_datetime(df['time'].astype(float), unit='s', utc=True)
-    df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
-    return df.set_index('time')
+    df = pd.DataFrame(data[key], columns=["time","open","high","low","close","vwap","volume","count"]).astype(float)
+    df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+    df = df.set_index('time')
+    return df
 
 
 def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -57,27 +57,31 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['tsi'] = tsi(df['close'])
     df['obv'] = on_balance_volume(df['close'], df['volume'])
     df['volume_spike'] = df['volume'] > df['volume'].rolling(20).mean() * 1.5
+    # Supertrend approximation
     df['supertrend_bull'] = df['close'] > df['high'].rolling(10).mean()
     df['supertrend_bear'] = df['close'] < df['low'].rolling(10).mean()
+    # Alligator
     df['jaw'] = df['close'].rolling(13).mean()
     df['teeth'] = df['close'].rolling(8).mean()
     df['lips'] = df['close'].rolling(5).mean()
     df['alligator_bull'] = (df['lips'] > df['teeth']) & (df['teeth'] > df['jaw'])
     df['alligator_bear'] = (df['lips'] < df['teeth']) & (df['teeth'] < df['jaw'])
+    # Ichimoku
     high9, low9 = df['high'].rolling(9).max(), df['low'].rolling(9).min()
     high26, low26 = df['high'].rolling(26).max(), df['low'].rolling(26).min()
     tenkan = (high9 + low9) / 2
     kijun = (high26 + low26) / 2
     df['span_a'] = ((tenkan + kijun) / 2).shift(26)
-    span52_high, span52_low = df['high'].rolling(52).max(), df['low'].rolling(52).min()
-    df['span_b'] = ((span52_high + span52_low) / 2).shift(26)
+    span52_h, span52_l = df['high'].rolling(52).max(), df['low'].rolling(52).min()
+    df['span_b'] = ((span52_h + span52_l) / 2).shift(26)
     df['ichimoku_bull'] = (df['close'] > df['span_a']) & (df['close'] > df['span_b'])
     df['ichimoku_bear'] = (df['close'] < df['span_a']) & (df['close'] < df['span_b'])
     df['ichimoku_twist'] = ((df['span_a'] - df['span_b']).abs().diff().rolling(2).mean()) < 1e-3
     latest = df.iloc[-1]
-    df['market_bias'] = '🟢 Bullish' if latest['close'] > latest['span_a'] and latest['close'] > latest['span_b'] else '🔴 Bearish'
+    df['market_bias'] = '🟢 Bullish' if latest['ichimoku_bull'] else '🔴 Bearish'
     return df
 
+# --- Signal Detection & Backtest ---
 class SignalDetector:
     def __init__(self, df): self.df = df
     def breakout_long(self):
@@ -105,7 +109,8 @@ class SignalDetector:
         else:
             stop = price + atr
             tp1, tp2 = price - atr*1.5, price - atr*2.5
-        return {'type': ttype, 'entry': price, 'stop': stop, 'tp1': tp1, 'tp2': tp2, 'rr': abs((tp1-price)/(price-stop))}
+        rr = abs((tp1 - price) / (price - stop))
+        return {'type': ttype, 'entry': price, 'stop': stop, 'tp1': tp1, 'tp2': tp2, 'rr': rr}
 
 def backtest(df):
     trades = []
@@ -119,8 +124,9 @@ def backtest(df):
     wins = [p for p in trades if p > 0]
     return {'total': len(trades), 'win_rate': len(wins)/len(trades)*100 if trades else 0}
 
+# --- Bot Setup with discord.Bot ---
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = discord.Bot(intents=intents)
 
 @bot.event
 async def on_ready():
@@ -131,22 +137,23 @@ async def on_ready():
 async def scan_loop():
     df = apply_indicators(fetch_ohlc())
     sig = SignalDetector(df).detect()
+    # Trade Alert
     if sig and channels['alert']:
         embed = discord.Embed(
             title=f"🚨 {sig['type']} – ETH/USDT",
             description="Confirmed by MACD flip + volume spike",
-            color=0x00FF00,
+            color=0x00FF00 if 'Long' in sig['type'] else 0xFF0000,
             timestamp=datetime.utcnow()
         )
-        embed.set_author(name="ETHTradeBot", icon_url="https://i.imgur.com/bot-icon.png")
+        embed.set_author(name="ETHTradeBot")
         embed.add_field(name="Entry", value=f"${sig['entry']:.2f}", inline=True)
         embed.add_field(name="Stop", value=f"${sig['stop']:.2f}", inline=True)
         embed.add_field(name="TP1", value=f"${sig['tp1']:.2f}", inline=True)
         embed.add_field(name="TP2", value=f"${sig['tp2']:.2f}", inline=True)
         embed.add_field(name="R/R", value=f"{sig['rr']:.2f}×", inline=True)
-        embed.set_thumbnail(url="https://i.imgur.com/mini-chart.png")
-        embed.set_footer(text="Updated every 30 min", icon_url="https://i.imgur.com/clock-icon.png")
+        embed.set_footer(text="Updated every 30 min")
         await bot.get_channel(channels['alert']).send(embed=embed)
+    # Status Report
     if channels['status']:
         l = df.iloc[-1]
         p = df.iloc[-2]
@@ -167,10 +174,11 @@ async def scan_loop():
         st.add_field(name="Alligator", value="🟢 Bullish" if l['alligator_bull'] else "🔴 Bearish" if l['alligator_bear'] else "⚪ Neutral", inline=True)
         st.add_field(name="Ichimoku", value="🟢 Bullish" if l['ichimoku_bull'] else "🔴 Bearish" if l['ichimoku_bear'] else "⚪ Neutral", inline=True)
         st.add_field(name="Twist Alert", value="⚠️ Detected" if l['ichimoku_twist'] else "✅ Stable", inline=True)
-        st.add_field(name="Market Bias", value=df['market_bias'].iloc[-1], inline=True)
+        st.add_field(name="Market Bias", value=l['market_bias'], inline=True)
         st.set_footer(text="Metrics updated every 30 min")
         await bot.get_channel(channels['status']).send(embed=st)
 
+# --- Slash Commands ---
 @bot.slash_command(description="Get an on-demand trade signal")
 async def trade(ctx):
     df = apply_indicators(fetch_ohlc())
@@ -183,10 +191,10 @@ async def trade(ctx):
         timestamp=datetime.utcnow()
     )
     for k in ['entry','stop','tp1','tp2','rr']:
-        name = k.capitalize() if k!='rr' else 'R/R'
-        value = f"${sig[k]:.2f}" if k!='rr' else f"{sig[k]:.2f}×"
+        name = k.capitalize() if k != 'rr' else 'R/R'
+        value = f"${sig[k]:.2f}" if k != 'rr' else f"{sig[k]:.2f}×"
         embed.add_field(name=name, value=value, inline=True)
-    embed.set_footer(text="Requested by user", icon_url="https://i.imgur.com/user-icon.png")
+    embed.set_footer(text="Requested by user")
     await ctx.respond(embed=embed)
 
 @bot.slash_command(description="Run a quick backtest of your strategy")
@@ -197,33 +205,30 @@ async def backtest_cmd(ctx, candles: int = 200):
 
 @bot.slash_command(description="Set alert channel")
 async def set_alert_channel(ctx):
-    channels['alert'] = ctx.channel.id; save_channels(channels)
+    channels['alert'] = ctx.channel.id
+    save_channels(channels)
     await ctx.respond(f"✅ Alert channel set to {ctx.channel.mention}")
 
 @bot.slash_command(description="Set status channel")
 async def set_status_channel(ctx):
-    channels['status'] = ctx.channel.id; save_channels(channels)
+    channels['status'] = ctx.channel.id
+    save_channels(channels)
     await ctx.respond(f"✅ Status channel set to {ctx.channel.mention}")
 
 @bot.slash_command(description="Check Alligator indicator status")
 async def alligator(ctx):
     df = apply_indicators(fetch_ohlc())
-    latest = df.iloc[-1]
-    status = ("🐊 Bullish" if latest['alligator_bull'] else "🐊 Bearish" if latest['alligator_bear'] else "🐊 Neutral")
+    l = df.iloc[-1]
+    status = "🐊 Bullish" if l['alligator_bull'] else "🐊 Bearish" if l['alligator_bear'] else "🐊 Neutral"
     embed = discord.Embed(title="Alligator Indicator", description=status, color=0x00FFFF, timestamp=datetime.utcnow())
     await ctx.respond(embed=embed)
 
 @bot.slash_command(description="Get Camarilla levels and status")
 async def camarilla(ctx):
     df = fetch_ohlc()
-    latest = df.iloc[-1]
-    h3, l3, price = latest['high']*1.015, latest['low']*0.985, latest['close']
-    if price > h3:
-        status = "Breakout (Above H3)"
-    elif price < l3:
-        status = "Breakdown (Below L3)"
-    else:
-        status = "Range bound (Between H3/L3)"
+    l = df.iloc[-1]
+    h3, l3, price = l['high']*1.015, l['low']*0.985, l['close']
+    status = "Breakout (Above H3)" if price > h3 else "Breakdown (Below L3)" if price < l3 else "Range bound"
     embed = discord.Embed(title="Camarilla Levels", color=0xFFA500, timestamp=datetime.utcnow())
     embed.add_field(name="H3", value=f"${h3:.2f}", inline=True)
     embed.add_field(name="L3", value=f"${l3:.2f}", inline=True)
@@ -235,8 +240,8 @@ async def camarilla(ctx):
 async def cloud(ctx):
     df = apply_indicators(fetch_ohlc())
     cur, prev = df.iloc[-1], df.iloc[-2]
-    cur_cloud = ("Green" if cur['ichimoku_bull'] else "Red" if cur['ichimoku_bear'] else "Neutral")
-    prev_cloud = ("Green" if prev['ichimoku_bull'] else "Red" if prev['ichimoku_bear'] else "Neutral")
+    cur_cloud = "Green" if cur['ichimoku_bull'] else "Red" if cur['ichimoku_bear'] else "Neutral"
+    prev_cloud = "Green" if prev['ichimoku_bull'] else "Red" if prev['ichimoku_bear'] else "Neutral"
     embed = discord.Embed(title="Ichimoku Cloud", color=0x800080, timestamp=datetime.utcnow())
     embed.add_field(name="Previous", value=prev_cloud, inline=True)
     embed.add_field(name="Current", value=cur_cloud, inline=True)
@@ -245,18 +250,14 @@ async def cloud(ctx):
 @bot.slash_command(description="Summarize 1% moves over 4hr candles")
 async def ethmoves(ctx):
     df = fetch_ohlc(interval='240', limit=42)
-    up=down=0
+    up = down = 0
     for i in range(len(df)-1):
         e = df['close'].iloc[i]
         tu, td = e*1.01, e*0.99
         for j in range(i+1, len(df)):
-            if df['high'].iloc[j] >= tu:
-                up+=1
-                break
-            if df['low'].iloc[j] <= td:
-                down+=1
-                break
-    total = up+down
+            if df['high'].iloc[j] >= tu: up += 1; break
+            if df['low'].iloc[j] <= td: down += 1; break
+    total = up + down
     embed = discord.Embed(title="1% Move Summary (4hr)", color=0x0000FF, timestamp=datetime.utcnow())
     embed.add_field(name="Up Moves", value=f"{up} ({up/total*100:.1f}%)", inline=True)
     embed.add_field(name="Down Moves", value=f"{down} ({down/total*100:.1f}%)", inline=True)
@@ -264,4 +265,4 @@ async def ethmoves(ctx):
     await ctx.respond(embed=embed)
 
 if __name__ == '__main__':
-    bot.run(TOKEN)
+    bot.run(TOKEN)```
