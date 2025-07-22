@@ -126,7 +126,13 @@ def backtest(df):
 
 # --- Bot Setup with discord.Bot ---
 intents = discord.Intents.default()
-bot = discord.Bot(intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents)
+# sync tree on ready
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    logging.info(f"Logged in as {bot.user}")
+    scan_loop.start()
 
 @bot.event
 async def on_ready():
@@ -179,7 +185,7 @@ async def scan_loop():
         await bot.get_channel(channels['status']).send(embed=st)
 
 # --- Slash Commands ---
-@bot.slash_command(description="Get an on-demand trade signal")
+@bot.tree.command(description="Get an on-demand trade signal")
 async def trade(ctx):
     df = apply_indicators(fetch_ohlc())
     sig = SignalDetector(df).detect()
@@ -197,25 +203,25 @@ async def trade(ctx):
     embed.set_footer(text="Requested by user")
     await ctx.respond(embed=embed)
 
-@bot.slash_command(description="Run a quick backtest of your strategy")
+@bot.tree.command(description="Run a quick backtest of your strategy")
 async def backtest_cmd(ctx, candles: int = 200):
     df = apply_indicators(fetch_ohlc(limit=candles))
     stats = backtest(df)
     await ctx.respond(f"Backtest: {stats['total']} trades, win rate {stats['win_rate']:.1f}%")
 
-@bot.slash_command(description="Set alert channel")
+@bot.tree.command(description="Set alert channel")
 async def set_alert_channel(ctx):
     channels['alert'] = ctx.channel.id
     save_channels(channels)
     await ctx.respond(f"✅ Alert channel set to {ctx.channel.mention}")
 
-@bot.slash_command(description="Set status channel")
+@bot.tree.command(description="Set status channel")
 async def set_status_channel(ctx):
     channels['status'] = ctx.channel.id
     save_channels(channels)
     await ctx.respond(f"✅ Status channel set to {ctx.channel.mention}")
 
-@bot.slash_command(description="Check Alligator indicator status")
+@bot.tree.command(description="Check Alligator indicator status")
 async def alligator(ctx):
     df = apply_indicators(fetch_ohlc())
     l = df.iloc[-1]
@@ -223,7 +229,7 @@ async def alligator(ctx):
     embed = discord.Embed(title="Alligator Indicator", description=status, color=0x00FFFF, timestamp=datetime.utcnow())
     await ctx.respond(embed=embed)
 
-@bot.slash_command(description="Get Camarilla levels and status")
+@bot.tree.command(description="Get Camarilla levels and status")
 async def camarilla(ctx):
     df = fetch_ohlc()
     l = df.iloc[-1]
@@ -236,7 +242,7 @@ async def camarilla(ctx):
     embed.set_footer(text=status)
     await ctx.respond(embed=embed)
 
-@bot.slash_command(description="Check Ichimoku Cloud state")
+@bot.tree.command(description="Check Ichimoku Cloud state")
 async def cloud(ctx):
     df = apply_indicators(fetch_ohlc())
     cur, prev = df.iloc[-1], df.iloc[-2]
@@ -247,7 +253,7 @@ async def cloud(ctx):
     embed.add_field(name="Current", value=cur_cloud, inline=True)
     await ctx.respond(embed=embed)
 
-@bot.slash_command(description="Summarize 1% moves over 4hr candles")
+@bot.tree.command(description="Summarize 1% moves over 4hr candles")
 async def ethmoves(ctx):
     df = fetch_ohlc(interval='240', limit=42)
     up = down = 0
@@ -266,3 +272,4 @@ async def ethmoves(ctx):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
