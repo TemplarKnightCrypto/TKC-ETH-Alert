@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 import pytz
 from datetime import datetime
-from discord.ext import tasks
+from discord.ext import tasks, commands
 import discord
 from ta.trend import ema_indicator
 from ta.momentum import rsi, stochrsi, tsi
@@ -127,15 +127,13 @@ def backtest(df):
 # --- Bot Setup with discord.Bot ---
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix='!', intents=intents)
-# sync tree on ready
-@bot.event
-async def on_ready():
-    await bot.tree.sync()
-    logging.info(f"Logged in as {bot.user}")
-    scan_loop.start()
+# --- Bot Setup with commands.Bot & Slash Sync ---
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.event
 async def on_ready():
+    await bot.tree.sync()
     logging.info(f"Logged in as {bot.user}")
     scan_loop.start()
 
