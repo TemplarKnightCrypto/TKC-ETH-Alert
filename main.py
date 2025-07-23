@@ -134,7 +134,7 @@ async def on_ready():
     logging.info(f"Logged in as {bot.user}")
     scan_loop.start()
 
-@tasks.loop(minutes=30)(minutes=30)
+@tasks.loop(minutes=30)
 async def scan_loop():
     df = apply_indicators(fetch_ohlc())
     sig = SignalDetector(df).detect()
@@ -267,4 +267,5 @@ async def ethmoves(ctx):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
