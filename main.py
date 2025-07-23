@@ -26,7 +26,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Channel IDs (set via commands)
+# Global state
+last_trade_hash = None
 alert_channel_id = None       # For trade alerts
 status_channel_id = None      # For 30-minute status reports
 
@@ -54,33 +55,41 @@ async def on_ready():
 @tasks.loop(minutes=30)
 async def eth_scan_30min():
     global last_trade_hash
-    df = get_eth_data()
-    if df is None:
-        print("Error fetching data, skipping 30m scan.")
-        return
+    try:
+        df = get_eth_data()
+        if df is None:
+            print("Error fetching data, skipping 30m scan.")
+            return
 
-    # Detect potential trades
-    trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
+        # Detect potential trades
+        trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
 
-    # Resolve channels
-    trade_ch = bot.get_channel(alert_channel_id)
-    status_ch = bot.get_channel(status_channel_id)
+        # Resolve channels
+        trade_ch = bot.get_channel(alert_channel_id)
+        status_ch = bot.get_channel(status_channel_id)
 
-    # Send trade alerts
-    if trade and trade_ch:
-        trade_hash = hash(frozenset(trade.items()))
-        if trade_hash != last_trade_hash:
-            last_trade_hash = trade_hash
-            trade['confidence'] = trade_confidence_score(df, trade)
-            await trade_ch.send(format_trade_alert(trade))
+        # Send trade alerts
+        if trade and trade_ch:
+            trade_hash = hash(frozenset(trade.items()))
+            if trade_hash != last_trade_hash:
+                last_trade_hash = trade_hash
+                trade['confidence'] = trade_confidence_score(df, trade)
+                await trade_ch.send(format_trade_alert(trade))
+            else:
+                print("Duplicate trade detected, skipping alert.")
+
+        # Send status update
+        if status_ch:
+            await status_ch.send(format_alerts(df))
         else:
-            print("Duplicate trade detected, skipping alert.")
+            print("⚠️ Status channel not set. Use !setstatuschannel.")
 
-    # Send status update
-    if status_ch:
-        await status_ch.send(format_alerts(df))
-    else:
-        print("⚠️ Status channel not set. Use !setstatuschannel.")
+    except Exception as e:
+        print(f"[eth_scan_30min] Caught exception, continuing: {e}")
+
+@eth_scan_30min.error
+async def eth_scan_error(error):
+    print(f"[eth_scan_30min] Task error handler caught: {error}")
 
 # Command: set trade alert channel
 default_doc = "Call this in the channel where you want trade alerts."
