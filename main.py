@@ -129,20 +129,12 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.event
-@bot.event
 async def on_ready():
     await bot.tree.sync()
     logging.info(f"Logged in as {bot.user}")
     scan_loop.start()
 
-
-
-async def on_ready():
-    await bot.tree.sync()
-    logging.info(f"Logged in as {bot.user}")
-    scan_loop.start()
-
-@tasks.loop(minutes=30)
+@tasks.loop(minutes=30)(minutes=30)
 async def scan_loop():
     df = apply_indicators(fetch_ohlc())
     sig = SignalDetector(df).detect()
