@@ -14,17 +14,27 @@ from ta.volatility import average_true_range
 from ta.volume import on_balance_volume
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load environment variables
+dotenv_path = os.getenv("DOTENV_PATH", None)
+if dotenv_path:
+    load_dotenv(dotenv_path)
+else:
+    load_dotenv()
 
+# Discord & timezone setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-last_trade_hash = None
-alert_channel_id = None
+
+# Channel IDs (set via commands)
+alert_channel_id = None       # For trade alerts
+status_channel_id = None      # For 30-minute status reports
+
+# Timezone for timestamps
 CENTRAL_TZ = pytz.timezone("US/Central")
 
+# Flask app for uptime
 app = Flask(__name__)
-
 @app.route('/')
 def home():
     return "Bot is live!"
@@ -34,38 +44,60 @@ def run_flask():
 
 threading.Thread(target=run_flask).start()
 
+# On ready: start the 30-minute scanner
 @bot.event
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     eth_scan_30min.start()
 
+# 30-minute loop: send trade alerts and status updates separately
 @tasks.loop(minutes=30)
 async def eth_scan_30min():
     global last_trade_hash
     df = get_eth_data()
-    if df is not None:
-        trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
-        channel = bot.get_channel(alert_channel_id)
-        if channel:
-            if trade:
-                trade_hash = hash(frozenset(trade.items()))
-                if trade_hash != last_trade_hash:
-                    last_trade_hash = trade_hash
-                    trade['confidence'] = trade_confidence_score(df, trade)
-                    await channel.send(format_trade_alert(trade))
-                else:
-                    print("Duplicate trade detected, skipping alert.")
-            await channel.send(format_alerts(df))
-        else:
-            print("⚠️ Alert channel is not set. Run !setchannel in Discord.")
+    if df is None:
+        print("Error fetching data, skipping 30m scan.")
+        return
 
+    # Detect potential trades
+    trade = detect_breakout_trade(df) or detect_pullback_trade(df) or detect_short_trade(df)
+
+    # Resolve channels
+    trade_ch = bot.get_channel(alert_channel_id)
+    status_ch = bot.get_channel(status_channel_id)
+
+    # Send trade alerts
+    if trade and trade_ch:
+        trade_hash = hash(frozenset(trade.items()))
+        if trade_hash != last_trade_hash:
+            last_trade_hash = trade_hash
+            trade['confidence'] = trade_confidence_score(df, trade)
+            await trade_ch.send(format_trade_alert(trade))
+        else:
+            print("Duplicate trade detected, skipping alert.")
+
+    # Send status update
+    if status_ch:
+        await status_ch.send(format_alerts(df))
+    else:
+        print("⚠️ Status channel not set. Use !setstatuschannel.")
+
+# Command: set trade alert channel
+default_doc = "Call this in the channel where you want trade alerts."
 @bot.command()
 async def setchannel(ctx):
     global alert_channel_id
     alert_channel_id = ctx.channel.id
-    await ctx.send("✅ Alerts will be sent to this channel.")
+    await ctx.send("✅ Trade alerts will be sent here.")
 
+# Command: set status report channel
 @bot.command()
+async def setstatuschannel(ctx):
+    global status_channel_id
+    status_channel_id = ctx.channel.id
+    await ctx.send("✅ 30‑minute status reports will be sent here.")
+
+# On-demand trade command\@bot.command()
 async def trade(ctx):
     df = get_eth_data()
     if df is not None:
@@ -77,7 +109,7 @@ async def trade(ctx):
     else:
         await ctx.send("⚠️ Could not fetch ETH data.")
 
-@bot.command()
+# On-demand price/status command\@bot.command()
 async def price(ctx):
     df = get_eth_data()
     if df is not None:
@@ -85,6 +117,7 @@ async def price(ctx):
     else:
         await ctx.send("⚠️ Could not fetch ETH data.")
 
+# Trade detection functions
 def detect_breakout_trade(df):
     latest = df.iloc[-1]
     resistance = df['high'].rolling(20).max().iloc[-2]
@@ -343,3 +376,4 @@ Price: ${price:.2f}
 
 if __name__ == "__main__":
     bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
